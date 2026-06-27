@@ -19,7 +19,6 @@ import SubstrateTypes
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
 // it's already in SubstrateTypes / SubstrateKernel / SubstrateML.
 // CI catches drift four ways. See packages/libs/Substrate{Types,
-// Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
 /// Backend factory: each backend's test target supplies one.
