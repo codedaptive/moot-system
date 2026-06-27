@@ -12,7 +12,7 @@ name = "persistence_kit"
 path = "src/lib.rs"
 
 [dependencies]
-substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+substrate-types = { package = "substrate-types", git = "https://github.com/codedaptive/moot-core", branch = "main" }
 uuid = { version = "1", features = ["v4"] }
 # SQLite backend: SQLCipher compiled from source (bundled, no system dep),
 # with vendored OpenSSL libcrypto for the page cipher. Provides whole-database
@@ -26,7 +26,7 @@ rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"]
 # disabled (the default). Off-path cost: one AtomicBool load + branch.
 # Layering: intellectus-lib has no repo deps; this is downstream→upstream.
 # Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
-intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
+intellectus-lib = { package = "intellectus-lib", git = "https://github.com/codedaptive/moot-core", branch = "main" }
 # ISO-8601 timestamp formatting for TEXT date columns (schema invariant).
 chrono = "0.4"
 # PostgreSQL backend: synchronous client (matches the sync Storage trait).

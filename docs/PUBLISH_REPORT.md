@@ -180,6 +180,17 @@ Removed internal/process comment lines:
 - `packages/libs/ObserverSink/rust/src/store.rs`: 29 line(s)
 - `packages/libs/ObserverSink/rust/tests/conformance.rs`: 6 line(s)
 
+## Dependency Rewrites
+
+Rewritten cross-venue Cargo dependencies:
+
+- packages/kits/ConvergenceKit/rust/Cargo.toml: `substrate-types` -> `codedaptive/moot-core`
+- packages/kits/PersistenceKit/rust/Cargo.toml: `intellectus-lib` -> `codedaptive/moot-core`
+- packages/kits/PersistenceKit/rust/Cargo.toml: `substrate-types` -> `codedaptive/moot-core`
+- packages/kits/QueueKit/rust/Cargo.toml: `intellectus-lib` -> `codedaptive/moot-core`
+- packages/kits/QueueKit/rust/Cargo.toml: `substrate-types` -> `codedaptive/moot-core`
+- packages/libs/ObserverSink/rust/Cargo.toml: `intellectus-lib` -> `codedaptive/moot-core`
+
 ## Notes
 
 This is a mechanical test publish. It proves source export, comment scrubbing,

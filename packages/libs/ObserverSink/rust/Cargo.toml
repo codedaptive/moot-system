@@ -14,7 +14,7 @@ path = "src/lib.rs"
 [dependencies]
 # IntellectusLib: StatsSink trait and StatSample datum.
 # Zero-dep floor crate; layering is correct (observer-sink is downstream).
-intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
+intellectus-lib = { package = "intellectus-lib", git = "https://github.com/codedaptive/moot-core", branch = "main" }
 
 # PersistenceKit: Storage trait, SchemaDeclaration, RowStore.
 # The SQLite backend (SqliteStorage) is used for the stats store.

@@ -5,8 +5,8 @@ edition = "2021"
 description = "QueueKit Rust parallel — FilesystemBackend per QUEUEKIT_SPEC"
 
 [dependencies]
-substrate-types  = { path = "../../../libs/SubstrateTypes/rust" }
-intellectus-lib  = { path = "../../../libs/IntellectusLib/rust" }
+substrate-types  = { package = "substrate-types", git = "https://github.com/codedaptive/moot-core", branch = "main" }
+intellectus-lib  = { package = "intellectus-lib", git = "https://github.com/codedaptive/moot-core", branch = "main" }
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 uuid       = { version = "1", features = ["v4"] }
