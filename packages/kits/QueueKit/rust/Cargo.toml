@@ -1,0 +1,62 @@
+[package]
+name = "queuekit"
+version = "0.1.0"
+edition = "2021"
+description = "QueueKit Rust parallel — FilesystemBackend per QUEUEKIT_SPEC"
+
+[dependencies]
+substrate-types  = { path = "../../../libs/SubstrateTypes/rust" }
+intellectus-lib  = { path = "../../../libs/IntellectusLib/rust" }
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+uuid       = { version = "1", features = ["v4"] }
+
+[dependencies.notify]
+version  = "6"
+optional = true
+
+# persistence-kit is required only when the "persistencekit" feature is
+# enabled. The dependency is path-relative to the workspace so no
+# external version pin is needed. Gated to keep the default
+# (Filesystem-only) build free of the SQLite/PostgreSQL transitive deps.
+[dependencies.persistence-kit]
+path     = "../../PersistenceKit/rust"
+optional = true
+
+[features]
+default     = ["filesystem"]
+filesystem  = []
+# Enables the real PersistenceKitBackend and pulls in persistence-kit.
+persistencekit  = ["dep:persistence-kit"]
+watch       = ["notify"]
+
+[lib]
+name = "queuekit"
+path = "src/lib.rs"
+
+[[test]]
+name = "conformance"
+path = "tests/conformance.rs"
+
+# await_drain await-empty latch + pending_count depth probe parity
+# (Dual-Path Intake P5 / G7). Mirrors AwaitDrainTests.swift over the
+# FilesystemBackend.
+[[test]]
+name = "await_drain"
+path = "tests/await_drain.rs"
+
+# Tests for ToolName + allowlist, QueueKitSchema, PersistenceKitBackend
+# round-trip, and QueueError variants. Requires the "persistencekit" feature.
+[[test]]
+name = "parity"
+path = "tests/parity.rs"
+required-features = ["persistencekit"]
+
+# Parity tests for the default-build (no `watch` feature) polling implementation
+# of FilesystemBackend::watch(). Confirms watch() works out of the box (no
+# external dependency) and delivers jobs near-realtime via 200 ms polling.
+# These tests are explicitly NOT run with --features watch (they target the
+# polling path; the event-driven path requires a separate CI step).
+[[test]]
+name = "watch_polling"
+path = "tests/watch_polling.rs"

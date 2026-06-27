@@ -1,0 +1,44 @@
+[package]
+name = "persistence-kit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Storage abstraction layer for the GeniusLocus substrate kits. Closed-enum predicate algebra, Storage + RowStore + BlobStore + AuditLog + StorageObserver traits. InMemory, SQLite (WAL-mode rusqlite, with AES-GCM-256 at-rest content encryption), and PostgreSQL backends all ship."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "persistence_kit"
+path = "src/lib.rs"
+
+[dependencies]
+substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+uuid = { version = "1", features = ["v4"] }
+# SQLite backend: SQLCipher compiled from source (bundled, no system dep),
+# with vendored OpenSSL libcrypto for the page cipher. Provides whole-database
+# at-rest encryption (Mode 3 / FullDatabase): the estate key is supplied via
+# PRAGMA key at open, so page 1 (the schema) and all content are ciphertext on
+# disk. Matches the prior zero-system-dependency posture of the plain bundled
+# build.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
+# intellectus-lib: zero-dep telemetry floor. persistence-kit emits DB-layer
+# health metrics via the report! macro, which is a no-op when monitoring is
+# disabled (the default). Off-path cost: one AtomicBool load + branch.
+# Layering: intellectus-lib has no repo deps; this is downstream→upstream.
+# Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
+intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
+# ISO-8601 timestamp formatting for TEXT date columns (schema invariant).
+chrono = "0.4"
+# PostgreSQL backend: synchronous client (matches the sync Storage trait).
+# Native-type features map UUID/TIMESTAMPTZ columns to uuid::Uuid /
+# chrono::DateTime<Utc>.
+postgres = { version = "0.19", features = ["with-uuid-1", "with-chrono-0_4"] }
+# AES-GCM-256 at-rest row encryption (PAR-5-PK). C-1 per-crate exception
+# recorded in DECISION_RUST_AEAD_CRATE_2026-06-05.md. Rationale: at-rest
+# AEAD; never hand-roll a cipher; random nonces are non-deterministic by
+# design so this is not conformance-byte-identity-gated.
+# getrandom feature required for OsRng-backed nonce generation on all targets.
+# Pinned to exact version for crypto supply-chain safety: a patch release to
+# aes-gcm could change AEAD behaviour and silently break cross-port
+# byte-identity of the ciphertext layout. Exact pinning prevents silent upgrades.
+aes-gcm = { version = "=0.10.3", features = ["aes"] }
