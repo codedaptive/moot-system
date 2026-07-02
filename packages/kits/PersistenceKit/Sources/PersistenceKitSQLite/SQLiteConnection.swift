@@ -33,6 +33,29 @@ final class SQLiteConnection: @unchecked Sendable {
         let parent = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
 
+        // CAND-052: Symlink refusal — reject a pre-planted symlink at the DB path.
+        //
+        // A symlink at the database location can redirect SQLite writes to an
+        // arbitrary file (e.g. /etc/passwd or another estate's SQLite). Refuse
+        // before opening. `resourceValues(forKeys:)` uses `lstat` semantics
+        // when asked for `isSymbolicLink` — it does NOT follow the symlink,
+        // so it correctly identifies the symlink itself rather than its target.
+        // Non-existent paths return `.resourceNotFound` or a missing key; both
+        // are safe to ignore (new-file creation path).
+        //
+        // Apple Data Protection (applied below after open) covers the DB file
+        // and its WAL sidecars at rest under the Secure Enclave key. This guard
+        // addresses the symlink-redirection attack surface (CAND-052), which is
+        // orthogonal to at-rest encryption.
+        if let attrs = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
+           attrs.isSymbolicLink == true {
+            throw StorageError.backendError(
+                underlying: "sqlite open: refusing to open \(url.lastPathComponent) " +
+                            "— path is a symbolic link. Pre-planted symlinks are a " +
+                            "security risk (CAND-052)."
+            )
+        }
+
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         let rc = sqlite3_open_v2(url.path, &handle, flags, nil)
         guard rc == SQLITE_OK, let handle else {
@@ -54,9 +77,9 @@ final class SQLiteConnection: @unchecked Sendable {
 
         // Apple Data Protection: the OS stores the estate encrypted at rest
         // under a Secure Enclave-derived key (the device passcode is the root
-        // secret). This is the Apple-native at-rest encryption — the Rust port
-        // uses SQLCipher; each port uses its platform's mechanism and the files
-        // are never shared. We bypass Core Data per PERSISTENCEKIT_SPEC
+        // secret). This layers Apple-native Data Protection on top of the
+        // SQLCipher whole-file key applied above (when keyHex is set); the
+        // Rust port uses SQLCipher only. We bypass Core Data per PERSISTENCEKIT_SPEC
         // invariant I-2, so we set directly the protection class Core Data would
         // otherwise request via NSPersistentStoreFileProtectionKey.
         Self.applyDataProtection(to: url)

@@ -1,8 +1,9 @@
 // ConvergenceKitNone.swift
 //
-// Single-device passthrough. enable() and disable() succeed
-// trivially; push() and pull() are no-ops returning empty
-// (closes when the caller cancels).
+// Single-device passthrough. enable() throws alreadyEnabled on
+// repeat calls; push()/pull() throw notEnabled before enable; all
+// produce empty receipts when enabled. subscribe() returns a stream
+// that closes when the caller cancels.
 //
 // Used when sync is structurally not wanted (development,
 // tests, deployments without iCloud or federation).

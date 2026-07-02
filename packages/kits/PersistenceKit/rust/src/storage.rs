@@ -103,20 +103,27 @@ impl EstateConfiguration {
         }
     }
 
-    /// Derive a sibling `EstateConfiguration` pointing at a queue database
-    /// file beside the estate's own database file (ADR-021 Decision 7, T3).
+    /// Derive a sibling `EstateConfiguration` pointing at a per-estate queue
+    /// database file beside the estate's own database file (ADR-021 Decision 7, T3).
     ///
-    /// The queue DB sits in the same directory as the estate DB so all
-    /// consumers of the same estate share one `queue.sqlite` by opening it
-    /// with the config this method returns. The encryption configuration is
-    /// carried over verbatim — an encrypted estate produces an encrypted queue.
+    /// The sibling file is named `<estate-stem>.<filename>` (e.g. for estate
+    /// `<dir>/<uuid>.sqlite` and filename `"queue.sqlite"` the result is
+    /// `<dir>/<uuid>.queue.sqlite`). This guarantees cross-estate isolation:
+    /// two estates in the same directory produce DIFFERENT sibling paths, so
+    /// one estate's encode/dreaming queue is never accessible to another estate's
+    /// workers. Within the same estate, the path is deterministic across
+    /// processes — all processes that open the same estate file share exactly
+    /// one queue file (ADR-021 Decision 7: one per-estate queue).
+    ///
+    /// The encryption configuration is carried over verbatim — an encrypted
+    /// estate produces an encrypted queue, sharing the cipher key so QueueKit
+    /// can open the queue file without additional key distribution.
     ///
     /// # Backend behaviour
     ///
     /// - `Sqlite { path, busy_timeout_secs }` — returns a new `Sqlite` config
-    ///   at `<estate-dir>/<filename>`, preserving `busy_timeout_secs` and
-    ///   carrying the same `encryption_config`. The sibling shares the encrypted
-    ///   key so QueueKit can open the queue file with the same cipher key.
+    ///   at `<estate-dir>/<estate-stem>.<filename>`, preserving `busy_timeout_secs`
+    ///   and carrying the same `encryption_config`.
     /// - `InMemory` — returns an InMemory config. The queue is ephemeral
     ///   alongside the ephemeral estate, which is correct for testing and
     ///   transient session estates.
@@ -142,17 +149,29 @@ impl EstateConfiguration {
 
         match &self.backend {
             BackendConfiguration::Sqlite { path, busy_timeout_secs } => {
-                // Replace only the filename component of the estate path.
-                // std::path::Path handles the parent-directory extraction;
-                // the sibling lands beside the estate in the same directory.
-                let parent = std::path::Path::new(path)
+                // Derive the per-estate sibling filename from the estate's own
+                // file stem so two estates in the same directory never share a
+                // queue file (ADR-021 Decision 7 isolation correctness).
+                // Estate: <dir>/<stem>.sqlite → sibling: <dir>/<stem>.<filename>
+                // E.g. <dir>/abc123.sqlite + "queue.sqlite" → <dir>/abc123.queue.sqlite
+                let estate_path = std::path::Path::new(path);
+                let stem = estate_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let per_estate_filename = if stem.is_empty() {
+                    filename.to_owned()
+                } else {
+                    format!("{}.{}", stem, filename)
+                };
+                let parent = estate_path
                     .parent()
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 let sibling_path = if parent.is_empty() {
-                    filename.to_owned()
+                    per_estate_filename
                 } else {
-                    format!("{}/{}", parent, filename)
+                    format!("{}/{}", parent, per_estate_filename)
                 };
                 Ok(EstateConfiguration {
                     estate_id: sibling_id,

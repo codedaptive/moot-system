@@ -1,9 +1,12 @@
 //! Tests for the hash-on-write decorator (NT-P2).
 //!
 //! Verifies:
-//!   Part 1: writes to hashable tables compute and emit dirty-chain events;
-//!           writes to non-hashable tables do not fire the hook.
-//!   Part 2: DirtyChainEvent can be constructed, dispatched, and received.
+//!   (a) insert to hashable table emits dirty-chain event
+//!   (b) upsert to hashable table emits dirty-chain event
+//!   (c) insert to non-hashable table does not fire the hook
+//!   (e) read operations pass through unchanged
+//!   (f) hashable field defaults to false
+//!   (g) DirtyChainEvent can be constructed, dispatched, and received
 
 use persistence_kit::hashing_row_store::{HashOnWriteConfig, HashingRowStore};
 use persistence_kit::observer::{DirtyChainEvent, DirtyChainHub};

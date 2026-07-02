@@ -76,6 +76,15 @@ pub enum StorageError {
     FeatureGated {
         feature: String,
     },
+    /// A caller-supplied SQL identifier (column name, table name) contains
+    /// characters outside the safe set `[A-Za-z_][A-Za-z0-9_]*`. Allowing
+    /// arbitrary identifiers into a dynamically-constructed SELECT list is a
+    /// SQL-injection vector even when the name is double-quoted, because a
+    /// name containing `"` can break out of the quoting and alter the query.
+    /// Planned hardening landed 2026-06-28 (SECFIX-WS2-PK).
+    InvalidIdentifier {
+        name: String,
+    },
 }
 
 impl std::fmt::Display for StorageError {
@@ -132,6 +141,9 @@ impl std::fmt::Display for StorageError {
             StorageError::FeatureGated { feature } => {
                 write!(f, "feature gated: {} is not yet enabled", feature)
             }
+            StorageError::InvalidIdentifier { name } => {
+                write!(f, "invalid SQL identifier: {:?} — only [A-Za-z_][A-Za-z0-9_]* is allowed", name)
+            }
         }
     }
 }
@@ -139,3 +151,29 @@ impl std::fmt::Display for StorageError {
 impl std::error::Error for StorageError {}
 
 pub type StorageResult<T> = Result<T, StorageError>;
+
+/// Validate a caller-supplied SQL identifier (column or table name).
+///
+/// Accepts only names matching `[A-Za-z_][A-Za-z0-9_]*`. Double-quoting is
+/// insufficient protection when the name contains `"` — the quote character
+/// escapes the double-quote delimiter and can alter a dynamically-constructed
+/// SQL string. Reject before embedding any name in a SELECT list or FROM clause.
+///
+/// Called by `SqliteRowStore::query_projected` and `PostgresRowStore::query_projected`
+/// to guard caller-supplied column names (SECFIX-WS2-PK F1).
+pub fn validate_sql_identifier(name: &str) -> StorageResult<()> {
+    let mut chars = name.chars();
+    match chars.next() {
+        None => return Err(StorageError::InvalidIdentifier { name: name.to_string() }),
+        Some(c) if !c.is_ascii_alphabetic() && c != '_' => {
+            return Err(StorageError::InvalidIdentifier { name: name.to_string() });
+        }
+        _ => {}
+    }
+    for c in chars {
+        if !c.is_ascii_alphanumeric() && c != '_' {
+            return Err(StorageError::InvalidIdentifier { name: name.to_string() });
+        }
+    }
+    Ok(())
+}

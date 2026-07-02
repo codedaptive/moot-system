@@ -56,20 +56,27 @@ public enum BackendConfiguration: Sendable {
 // MARK: — Queue sibling derivation (ADR-021 T3)
 
 extension EstateConfiguration {
-    /// Derive a sibling `EstateConfiguration` pointing at a queue database
-    /// file beside the estate's own database file (ADR-021 Decision 7).
+    /// Derive a sibling `EstateConfiguration` pointing at a per-estate queue
+    /// database file beside the estate's own database file (ADR-021 Decision 7).
     ///
-    /// The queue DB sits in the same directory as the estate DB so all
-    /// consumers of the same estate share one `queue.sqlite` by opening it
-    /// with the config this method returns. The encryption configuration is
-    /// carried over verbatim — an encrypted estate produces an encrypted queue.
+    /// The sibling file is named `<estate-stem>.<filename>` (e.g. for estate
+    /// `<dir>/<uuid>.sqlite` and filename `"queue.sqlite"` the result is
+    /// `<dir>/<uuid>.queue.sqlite`). This guarantees cross-estate isolation:
+    /// two estates in the same directory produce DIFFERENT sibling paths, so
+    /// one estate's encode/dreaming queue is never accessible to another estate's
+    /// workers. Within the same estate, the path is deterministic across
+    /// processes — all processes that open the same estate file share exactly
+    /// one queue file (ADR-021 Decision 7: one per-estate queue).
+    ///
+    /// The encryption configuration is carried over verbatim — an encrypted
+    /// estate produces an encrypted queue, sharing the cipher key so QueueKit
+    /// can open the queue file without additional key distribution.
     ///
     /// # Backend behaviour
     ///
     /// - `.sqlite(url:busyTimeout:)` — returns a new `.sqlite` config at
-    ///   `<estate-dir>/<filename>`, preserving `busyTimeout` and carrying
-    ///   the same `encryptionConfig`. The sibling shares the encrypted key
-    ///   so QueueKit can open the queue file with the same cipher key.
+    ///   `<estate-dir>/<estate-stem>.<filename>`, preserving `busyTimeout` and
+    ///   carrying the same `encryptionConfig`.
     /// - `.inMemory` — returns an InMemory config. The queue is ephemeral
     ///   alongside the ephemeral estate, which is correct for testing and
     ///   transient sessions.
@@ -91,8 +98,10 @@ extension EstateConfiguration {
     /// (2) deterministic — same estate UUID + same filename → same sibling UUID.
     /// (3) no random minting — `UUID()` is never called on this path.
     ///
-    /// - Parameter filename: The filename for the sibling database (e.g.
-    ///   `"queue.sqlite"`). Must be a bare filename — no path separators.
+    /// - Parameter filename: The base filename for the sibling database (e.g.
+    ///   `"queue.sqlite"`). Must be a bare filename — no path separators. The
+    ///   actual sibling filename is prefixed with the estate's file stem so two
+    ///   estates in the same directory produce distinct sibling paths.
     /// - Returns: A new `EstateConfiguration` for the queue database.
     /// - Throws: `StorageError.featureGated` if the estate uses a PostgreSQL
     ///   backend (the Postgres queue path is deferred to ADR-021 Postgres pass).
@@ -101,10 +110,13 @@ extension EstateConfiguration {
 
         switch backend {
         case let .sqlite(url, busyTimeout):
-            // Replace only the last path component (the DB filename). The
-            // sibling lives beside the estate in the same directory, so all
-            // consumers resolve the same `queue.sqlite` path.
-            let siblingURL = url.deletingLastPathComponent().appendingPathComponent(filename)
+            // Derive the per-estate sibling filename from the estate's own DB
+            // stem so two estates in the same directory never share a queue.
+            // Estate: <dir>/<stem>.sqlite → sibling: <dir>/<stem>.<filename>
+            // E.g. <dir>/abc123.sqlite + "queue.sqlite" → <dir>/abc123.queue.sqlite
+            let stem = url.deletingPathExtension().lastPathComponent
+            let perEstateName = "\(stem).\(filename)"
+            let siblingURL = url.deletingLastPathComponent().appendingPathComponent(perEstateName)
             return EstateConfiguration(
                 estateID: siblingID,
                 backend: .sqlite(url: siblingURL, busyTimeout: busyTimeout),

@@ -1,7 +1,7 @@
 // Integration tests for federation inbound event dispatch.
-// Verifies that pull() routes insert, update, and delete records
-// correctly through each conflict policy. Mirrors
-// FederationInboundEventTests.swift.
+// Covers insert replication and delete behavior across several policies;
+// does not exercise update behavior or insert behavior through every
+// conflict policy. Mirrors FederationInboundEventTests.swift.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

@@ -11,6 +11,22 @@ pub enum SyncDirection {
     PullOnly,
 }
 
+impl std::fmt::Display for SyncDirection {
+    /// Parity contract: must match Swift `SyncDirection.rawValue` which are
+    /// camelCase string raw values: "bidirectional", "pushOnly", "pullOnly".
+    /// Used in `format_sync_state_token` so sync status tokens are identical
+    /// between Swift and Rust. The `{direction:?}` (Debug) form was wrong:
+    /// it emits PascalCase ("Bidirectional", "PushOnly", "PullOnly") which
+    /// diverges from Swift's camelCase rawValue output.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SyncDirection::Bidirectional => write!(f, "bidirectional"),
+            SyncDirection::PushOnly => write!(f, "pushOnly"),
+            SyncDirection::PullOnly => write!(f, "pullOnly"),
+        }
+    }
+}
+
 /// Conflict resolution policy applied at the receive boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

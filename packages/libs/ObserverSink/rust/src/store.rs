@@ -330,10 +330,28 @@ fn make_schema() -> SchemaDeclaration {
 // ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Minimum and maximum Unix epoch seconds that map to displayable ISO-8601
+/// years in the 0001–9999 range.  PersistenceKit's timestamp encoder
+/// enforces the same bounds; matching them here keeps TEXT timestamps
+/// consistent across all write paths.
+///
+/// MIN_EPOCH: 0001-01-01T00:00:00Z (year 0001)
+/// MAX_EPOCH: 9999-12-31T23:59:59Z (year 9999)
+const MIN_EPOCH_SECS: i64 = -62_135_596_800;
+const MAX_EPOCH_SECS: i64 =  253_402_300_799;
+
 /// Encode epoch seconds (f64) to ISO-8601 UTC TEXT with millisecond precision.
+///
+/// Clamps the timestamp to years 0001–9999 before formatting, matching
+/// PersistenceKit's epoch clamping. Out-of-range epoch values (negative
+/// extremes, NaN, infinity) produce malformed TEXT years outside the four-digit
+/// range that ISO-8601 mandates, which breaks SQLite's datetime() functions and
 pub(crate) fn epoch_to_iso8601(secs: f64) -> String {
-    let whole_secs = secs.floor() as i64;
-    let nanos = ((secs - secs.floor()) * 1_000_000_000.0) as u32;
+    // Saturating cast: in Rust ≥ 1.45, f64-as-i64 saturates at i64 bounds
+    // for out-of-range values (including ±∞ and NaN → 0). The subsequent
+    // clamp then brings the value into the year 0001–9999 epoch window.
+    let whole_secs = (secs.floor() as i64).clamp(MIN_EPOCH_SECS, MAX_EPOCH_SECS);
+    let nanos = ((secs - secs.floor()).clamp(0.0, 0.999_999_999) * 1_000_000_000.0) as u32;
     match Utc.timestamp_opt(whole_secs, nanos) {
         chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
         _ => "1970-01-01T00:00:00.000Z".to_string(),
@@ -1175,5 +1193,80 @@ impl EventRow {
             ts_epoch,
             dropbox_id,
         })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit tests — epoch_to_iso8601 clamping
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod epoch_iso_tests {
+    use super::epoch_to_iso8601;
+
+    /// A normal epoch (Unix time for 2024-01-01T00:00:00Z) must produce a
+    /// valid 4-digit-year ISO-8601 string.
+    #[test]
+    fn normal_epoch_produces_valid_iso8601() {
+        let s = epoch_to_iso8601(1_704_067_200.0); // 2024-01-01T00:00:00Z
+        assert!(s.starts_with("2024-"), "expected year 2024, got: {s}");
+        assert!(s.ends_with('Z'), "must end with Z");
+    }
+
+    /// An epoch value far in the past (year < 0001) must be clamped to
+    /// year 0001, not produce a negative-year string or panic.
+    #[test]
+    fn far_past_epoch_clamped_to_year_0001() {
+        let s = epoch_to_iso8601(-1e18); // far before 0001-01-01
+        assert!(s.starts_with("0001-"), "expected year 0001, got: {s}");
+    }
+
+    /// An epoch value far in the future (year > 9999) must be clamped to
+    /// year 9999, not produce a 5-digit-year string or panic.
+    #[test]
+    fn far_future_epoch_clamped_to_year_9999() {
+        let s = epoch_to_iso8601(1e18); // far after 9999-12-31
+        assert!(s.starts_with("9999-"), "expected year 9999, got: {s}");
+    }
+
+    /// f64::MAX must not panic — saturating cast to i64 then clamp handles it.
+    #[test]
+    fn f64_max_does_not_panic() {
+        let s = epoch_to_iso8601(f64::MAX);
+        assert!(!s.is_empty(), "f64::MAX must not produce an empty string");
+        assert!(s.starts_with("9999-"), "f64::MAX should clamp to year 9999, got: {s}");
+    }
+
+    /// f64::NEG_INFINITY must not panic.
+    #[test]
+    fn neg_infinity_does_not_panic() {
+        let s = epoch_to_iso8601(f64::NEG_INFINITY);
+        assert!(!s.is_empty(), "NEG_INFINITY must not produce an empty string");
+        assert!(s.starts_with("0001-"), "NEG_INFINITY should clamp to year 0001, got: {s}");
+    }
+
+    /// NaN must not panic — the saturating cast of NaN to i64 in Rust >= 1.45
+    /// produces 0, which lies within the 0001–9999 epoch window.
+    #[test]
+    fn nan_does_not_panic() {
+        let s = epoch_to_iso8601(f64::NAN);
+        assert!(!s.is_empty(), "NaN must not produce an empty string");
+        assert!(s.ends_with('Z'), "must end with Z");
+    }
+
+    /// The produced ISO-8601 string must always have a 4-digit year.
+    #[test]
+    fn output_always_has_4_digit_year_component() {
+        for secs in [
+            -62_135_596_800.0_f64, // MIN_EPOCH_SECS (year 0001)
+            253_402_300_799.0_f64, // MAX_EPOCH_SECS (year 9999)
+            0.0_f64,               // Unix epoch (year 1970)
+        ] {
+            let s = epoch_to_iso8601(secs);
+            let year_part = &s[..4];
+            assert_eq!(year_part.len(), 4, "year must be 4 digits in {s}");
+            assert!(year_part.chars().all(|c| c.is_ascii_digit()),
+                    "year must be all digits in {s}");
+        }
     }
 }

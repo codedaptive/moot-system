@@ -1,21 +1,25 @@
-// watch_polling.rs — Parity tests for the default-build (no `watch` feature)
-// `FilesystemBackend::watch()` polling implementation.
+// watch_polling.rs — Contract tests for `FilesystemBackend::poll_watch_loop`.
+//
+// These tests run when the `watch` feature is disabled
+// (`cargo test --no-default-features --features filesystem`), exercising the
+// poll-only path directly. Since `watch` is now a default feature, these tests
+// are EXCLUDED from the default `cargo test` run — they are preserved for:
+//   - Explicit poll-path validation in constrained / embedded builds.
+//   - Regression guard: the polling contract must hold independently of the
+//     evented path. The same contract (drain-first, fail-closed, near-realtime)
+//     is tested via `poll_watch_loop` called directly in `watch_evented.rs`.
 //
 // CONTRACT UNDER TEST (QUEUEKIT_SPEC §3, §5 B-3):
-//   1. watch() works in a default build (no --features watch) — it is NOT
-//      BackendUnavailable. Swift's filesystem backend watches by default via
-//      kqueue/poll; the Rust default must match.
-//   2. Drain-first semantics: the handler is invoked through drain_available(),
-//      not from the wake payload. A job written AFTER watch() starts is delivered
-//      within a bounded time (near-realtime via polling).
-//   3. handler() errors propagate: watch() returns Err when the handler returns
-//      Err, satisfying the fail-closed contract (SPEC §5 B-3).
-//   4. Jobs already present before watch() starts are drained in the initial
-//      drain pass (before the poll loop), not lost.
+//   1. poll_watch_loop is not BackendUnavailable — it always delivers jobs.
+//   2. Drain-first semantics: handler is called through drain_available(), not
+//      the wake payload. A job written AFTER the loop starts is delivered within
+//      a bounded time (near-realtime via 200 ms polling).
+//   3. handler() errors propagate fail-closed (SPEC §5 B-3).
+//   4. Jobs already present before watch() starts are drained in the initial pass.
 //
 // All tests terminate in well under 3 seconds (watchdog rule).
-// The 200 ms WATCH_POLL_INTERVAL means any test waiting for a handler
-// invocation needs to allow at most a few poll ticks — 1 s is generous.
+// The 200 ms WATCH_POLL_INTERVAL means any test waiting for handler invocation
+// needs at most a few poll ticks — 1 s is generous.
 
 #[cfg(not(feature = "watch"))]
 mod polling_tests {

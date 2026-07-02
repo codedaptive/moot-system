@@ -101,8 +101,8 @@ impl From<StorageError> for ReplicationError {
 /// Always performs a full snapshot: every row in every schema-declared table,
 /// all audit events, and all blobs are copied atomically in a serializable
 /// transaction. The operation is idempotent — a second call with no source
-/// changes writes zero new rows (upsert on primary key is a no-op for
-/// identical values).
+/// changes runs the upsert (ON CONFLICT DO UPDATE) for each existing row but
+/// does not create duplicate rows in the destination.
 ///
 /// - `source`: Storage to read from (must be open).
 /// - `destination`: Storage to write to (must be open).
@@ -243,9 +243,10 @@ fn replicate_full(
                 }
 
                 // 3c. Blob copy: write every blob from the snapshot into the
-                // destination. put() is idempotent on key — a repeated full
-                // flush with the same blobs writes zero new blobs (all keys
-                // already exist). Empty blobs (zero bytes) are written correctly.
+                // destination. put() overwrites any existing key with identical
+                // bytes; a repeated full flush does not create new blob keys but
+                // blobs_written increments for every put. Empty blobs (zero bytes)
+                // are written correctly.
                 for (key, bytes) in &payload_ref.blobs {
                     blob_store.put(key, bytes)?;
                     *blobs_written_ref += 1;
@@ -504,7 +505,7 @@ mod replication_tests {
             after_operational: 0,
             after_provenance: 0,
             before_lattice_anchor: None,
-            after_lattice_anchor: 0,
+            after_lattice_anchor: 0, before_lattice_qid: None, after_lattice_qid: 0,
             actor: "test".into(),
             reason: None,
         }

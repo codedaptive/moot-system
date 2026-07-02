@@ -3,8 +3,8 @@
 //! SyncRecord wraps a PersistenceKit TableChange with sync metadata
 //! (schema version, kit id, HLC). The receiver decodes, validates
 //! schema and kit, and applies the change through its local
-//! PersistenceKit. Schema or kit mismatch causes the record to be
-//! rejected (queued for retry post-app-update).
+//! PersistenceKit. Schema or kit mismatch is counted as a conflict
+//! and the record is skipped; no retry queue is present.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

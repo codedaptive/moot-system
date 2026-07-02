@@ -17,11 +17,14 @@
 //! aggregates for every node in the chain.
 //!
 //! Sensitivity gate: rows whose `provenance` column encodes a sensitivity
-//! level above the configured threshold — or equal to Secret (level 3) —
-//! are never admitted. Absent column → admit; unparseable value → reject
-//! (fail closed). Encoding per ARIA adjective contract:
-//!   level = (raw_i64 >> 4) & 0x7   (bits [6:4])
-//!   0 = Normal, 1 = Elevated, 2 = Restricted, 3 = Secret
+//! level above the configured threshold — or equal to Secret (ordinal 3) —
+//! are never admitted. Absent column → admit; unparseable value or
+//! unrecognised bit pattern → reject (fail closed).
+//! Encoding per provenance bitmap spec (cookbook §2.5 v0.6):
+//!   field = (raw_i64 >> 30) & 0x3F   (bits [35:30])
+//!   raw 0 = Normal, 16 = Elevated, 32 = Restricted, 48 = Secret (scale-gapped)
+//! EstateCacheConfig.sensitivity_threshold is an ordinal (0–2); the gate maps
+//! scale-gapped raw values to ordinals before comparing.
 //!
 //! LRU eviction fires when estimated hot-tier bytes exceed `ceiling_bytes`.
 //! `ceiling_bytes == 0` means no limit.
@@ -184,24 +187,37 @@ fn extract_key(predicate: Option<&StoragePredicate>) -> Option<RowKey> {
 
 /// Returns `true` when `row` is eligible for the hot tier.
 ///
-/// `provenance` encodes sensitivity in bits [6:4]: `level = (raw >> 4) & 0x7`.
+/// Sensitivity is encoded in the `provenance` bitmap at bits 30–35 (6-bit
+/// field, scale-gapped per cookbook §2.5 v0.6). The gate converts the raw
+/// field value to an ordinal (0–3) and compares it against the config
+/// threshold, which is also expressed as an ordinal.
 ///
-///   - Column absent           → admit
-///   - level > threshold       → reject
-///   - level == 3 (Secret)     → reject always regardless of threshold
-///   - Unparseable value       → reject (fail closed)
+///   - Column absent              → admit
+///   - ordinal > threshold        → reject
+///   - ordinal == 3 (Secret)      → reject always regardless of threshold
+///   - Unrecognised bit pattern   → reject (fail closed)
+///   - Unparseable value          → reject (fail closed)
 fn is_admissible(row: &StorageRow, config: &EstateCacheConfig) -> bool {
     match row.get("provenance") {
         None => true,
         Some(TypedValue::Int(raw)) | Some(TypedValue::Bitmap(raw)) => {
-            let level = ((raw >> 4) & 0x7) as i32;
+            // Sensitivity at capture lives in bits 30–35 of the provenance bitmap
+            // (6-bit field, scale-gapped: 0/16/32/48 per cookbook §2.5 v0.6).
+            let raw_field = ((raw >> 30) & 0x3F) as i32;
+            let ordinal = match raw_field {
+                0  => 0,  // Normal
+                16 => 1,  // Elevated
+                32 => 2,  // Restricted
+                48 => 3,  // Secret
+                _  => return false, // Unrecognised bit pattern → fail closed
+            };
             // Hard Secret exclusion is defence-in-depth: threshold is already
             // clamped to ≤2 by EstateCacheConfig, but the guard is correct
             // even if that clamp were bypassed.
-            if level == 3 {
+            if ordinal == 3 {
                 return false;
             }
-            level <= config.sensitivity_threshold
+            ordinal <= config.sensitivity_threshold
         }
         Some(_) => false, // unparseable → fail closed
     }

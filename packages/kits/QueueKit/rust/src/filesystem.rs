@@ -22,13 +22,16 @@ use crate::job::{
 
 const STALE_TMP: Duration = Duration::from_secs(5 * 60);
 
-/// Poll cadence for the default (no `watch` feature) filesystem watcher.
+/// Poll cadence for the directory watcher's polling path.
+///
 /// 200 ms — matches Swift's `Watcher.watchPoll` interval (200_000_000 ns)
-/// so both ports deliver the same near-realtime guarantee out of the box.
-/// Short enough for near-realtime throughput; long enough that the thread
-/// does not spin a core. Only compiled when the `watch` feature is absent
-/// (the event-driven path has no need of a poll interval).
-#[cfg(not(feature = "watch"))]
+/// so both ports deliver the same near-realtime guarantee. Short enough for
+/// near-realtime throughput; long enough that the thread does not spin a core.
+///
+/// Used by the `poll_watch_loop` helper, which is:
+///   - the sole `watch()` implementation when the `watch` feature is disabled.
+///   - the runtime fallback when `watch` is enabled but `RecommendedWatcher`
+///     setup fails (inotify watch-limit exhausted, unsupported filesystem, etc.).
 const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 pub struct FilesystemBackend {
@@ -43,13 +46,53 @@ struct HlcGenState {
 }
 
 /// Opens `path` for exclusive write creation (O_CREAT | O_EXCL).
-/// On Unix the file is created with mode 0o644; Windows has no
+/// On Unix the file is created with mode 0o600 (owner read/write only) —
+/// queue files carry encoded job payloads that may include sensitive content
+/// from the estate. Restricting access to the owning process is defense in
+/// is omitted.
 fn create_exclusive(path: &Path) -> std::io::Result<File> {
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
-    opts.mode(0o644);
+    opts.mode(0o600);
     opts.open(path)
+}
+
+// MARK: - Identifier validation (planned security hardening, CAND-023)
+
+/// Validates that `id` is a safe single filesystem path component.
+///
+/// An identifier used to build a queue path (stream_id, job id, or any
+/// caller-influenced component) must not contain characters that could
+/// escape the queue root via path traversal. Specifically, rejects:
+///   - empty strings
+///   - "." or ".." (dot directory components)
+///   - '/' or '\' (POSIX and Windows path separators)
+///   - ASCII control characters 0x00–0x1F and 0x7F
+///
+/// or "dreaming" — all pass. Enforces the same rule as Swift and Python
+/// ports. Returns `Err(QueueError::InvalidIdentifier)` on rejection.
+fn validate_identifier(id: &str) -> Result<(), QueueError> {
+    if id.is_empty() {
+        return Err(QueueError::InvalidIdentifier(
+            "empty identifier".to_string()));
+    }
+    if id == "." || id == ".." {
+        return Err(QueueError::InvalidIdentifier(
+            format!("dot component: {:?}", id)));
+    }
+    for ch in id.chars() {
+        if ch == '/' || ch == '\\' {
+            return Err(QueueError::InvalidIdentifier(
+                format!("path separator in {:?}", id)));
+        }
+        let v = ch as u32;
+        if v <= 0x1F || v == 0x7F {
+            return Err(QueueError::InvalidIdentifier(
+                format!("control character in {:?}", id)));
+        }
+    }
+    Ok(())
 }
 
 impl FilesystemBackend {
@@ -130,6 +173,41 @@ impl FilesystemBackend {
         Ok(())
     }
 
+    /// 200 ms poll loop — the watch fallback shared by both build configurations.
+    ///
+    /// Active in two scenarios:
+    ///   1. `watch` feature disabled (no-watch build) — sole watcher implementation.
+    ///   2. `watch` feature enabled but `RecommendedWatcher` setup failed at
+    ///      runtime (inotify watch-limit exhausted, unsupported filesystem, etc.)
+    ///      — automatic fallback from the evented path.
+    ///
+    /// Drain-first: jobs present before this is called are drained in the initial
+    /// pass, not lost. Each 200 ms tick is treated as a wake hint; drain_available()
+    /// is the authority on what is claimable. Spurious ticks that find new/ empty
+    /// drain to nothing and loop. A drain error propagates fail-closed (SPEC §5 B-3).
+    ///
+    /// Exposed as `pub` so integration tests can call it directly to verify the
+    /// fallback path's contract without triggering evented watcher setup.
+    /// Not part of the `QueueBackend` trait — this is an inherent helper on
+    /// `FilesystemBackend` specifically.
+    pub fn poll_watch_loop(&self, handler: WatchHandler) -> Result<(), QueueError> {
+        // Drain anything already present before entering the poll loop so jobs
+        // that arrived before watch() was called are not lost.
+        for (job, session_id) in self.drain_available()? {
+            handler(job, session_id)?;
+        }
+
+        loop {
+            std::thread::sleep(WATCH_POLL_INTERVAL);
+            // Each tick is treated as a wake hint; drain_available() is the
+            // authority. Spurious ticks that find new/ empty drain to nothing.
+            let pairs = self.drain_available()?;
+            for (job, session_id) in pairs {
+                handler(job, session_id)?;
+            }
+        }
+    }
+
     fn next_hlc(&self) -> HLC {
         let now_ms: i64 = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -156,6 +234,9 @@ impl QueueBackend for FilesystemBackend {
 
     // spec §8
     fn write(&self, job: &Job) -> Result<(), QueueError> {
+        // Validate before any filesystem path construction.
+        validate_identifier(&job.stream_id.0)?;
+        validate_identifier(&job.id.0)?;
         let encoded = encode_job(job);
         let filename = filename_for_job(job);
         let tmp_path = self.tmp_dir().join(&filename);
@@ -216,6 +297,9 @@ impl QueueBackend for FilesystemBackend {
         }
         let mut written = 0usize;
         for job in jobs {
+            // Validate before any filesystem path construction.
+            validate_identifier(&job.stream_id.0)?;
+            validate_identifier(&job.id.0)?;
             let encoded = encode_job(job);
             let filename = filename_for_job(job);
             let tmp_path = self.tmp_dir().join(&filename);
@@ -306,6 +390,8 @@ impl QueueBackend for FilesystemBackend {
         status: ObservationStatus,
         artifacts: Vec<ArtifactRef>,
     ) -> Result<(), QueueError> {
+        // Validate before signal file path construction.
+        validate_identifier(&job_id.0)?;
         if !status.is_terminal() {
             return Err(QueueError::InvalidTerminalStatus(
                 status.raw().to_string()));
@@ -374,6 +460,10 @@ impl QueueBackend for FilesystemBackend {
     ) -> Result<usize, QueueError> {
         if completions.is_empty() {
             return Ok(0);
+        }
+        // Validate all identifiers before touching the filesystem.
+        for (job_id, _) in completions {
+            validate_identifier(&job_id.0)?;
         }
         for (_, status) in completions {
             if !status.is_terminal() {
@@ -560,40 +650,49 @@ impl QueueBackend for FilesystemBackend {
 
     // spec §3, §4: watch()
     //
-    // Two implementations behind a feature gate — same external contract,
-    // different wake mechanism:
+    // Architecture: evented by default with automatic poll fallback.
     //
-    //   Default build (no feature flag):
-    //     Polling fallback. Scans new/ on a fixed 200 ms cadence (matching
-    //     Swift's Watcher.watchPoll interval), treating each tick as a wake
-    //     signal. No external dependency; works out of the box. Delivers
-    //     near-realtime throughput at the polling granularity.
+    //   Default build (`watch` feature, which is now in `default`):
+    //     Attempts to set up `RecommendedWatcher` from the `notify` crate —
+    //     inotify on Linux, kqueue/FSEvents on macOS, ReadDirectoryChangesW
+    //     on Windows. If setup fails (inotify watch-limit exhausted,
+    //     unsupported filesystem, etc.), falls back to `poll_watch_loop`
+    //     automatically. Same drain-first contract on both paths.
     //
-    //   --features watch:
-    //     Event-driven via the `notify` crate (OS file-system events). Lower
-    //     latency than polling; same drain-first contract. An upgrade, not a
-    //     requirement.
+    //   No-watch build (--no-default-features --features filesystem):
+    //     Uses `poll_watch_loop` directly. No external dependency.
+    //     Useful for embedded targets or constrained environments.
     //
     // Both paths share the same wake contract: every wake calls drain_available()
     // as the authority on what is claimable — the wake is a hint, never
     // authoritative. Spurious wakes drain to empty harmlessly. A drain error
-    // propagates (fail-closed per SPEC §5 B-3).
+    // propagates fail-closed (SPEC §5 B-3).
 
     #[cfg(feature = "watch")]
     fn watch(&self, handler: WatchHandler) -> Result<(), QueueError> {
-        use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+        use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher};
         use std::sync::mpsc;
 
         let (tx, rx) = mpsc::channel();
-        let mut watcher = RecommendedWatcher::new(tx, Config::default())
-            .map_err(|e| QueueError::WatcherFailed(e.to_string()))?;
-        watcher
-            .watch(self.new_dir().as_path(), RecursiveMode::NonRecursive)
-            .map_err(|e| QueueError::WatcherFailed(e.to_string()))?;
 
-        // Drain anything already present before blocking on events,
-        // so jobs that arrived between the maildir scan and the
-        // watcher attach are not lost.
+        // Attempt evented watcher setup. Both `new` and `watch` can fail on
+        // resource-exhausted or unsupported-fs conditions (inotify limits,
+        // NFS, certain FUSE mounts). On any setup failure, fall back to
+        // poll_watch_loop automatically — no error is surfaced for setup
+        // failures, matching Swift's watchLinux fallback behavior.
+        let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
+            Ok(w) => w,
+            Err(_) => return self.poll_watch_loop(handler),
+        };
+        if watcher
+            .watch(self.new_dir().as_path(), RecursiveMode::NonRecursive)
+            .is_err()
+        {
+            return self.poll_watch_loop(handler);
+        }
+
+        // Drain anything already present before blocking on events, so jobs
+        // that arrived between the maildir scan and the watcher attach are not
         for (job, session_id) in self.drain_available()? {
             handler(job, session_id)?;
         }
@@ -601,7 +700,7 @@ impl QueueBackend for FilesystemBackend {
         loop {
             match rx.recv() {
                 Ok(_event) => {
-                    // Wake is a signal only; drain_available() is the authority
+                    // Wake is a hint only; drain_available() is the authority
                     // on what is actually claimable (drain-first semantics).
                     let pairs = self.drain_available()?;
                     for (job, session_id) in pairs {
@@ -617,27 +716,8 @@ impl QueueBackend for FilesystemBackend {
 
     #[cfg(not(feature = "watch"))]
     fn watch(&self, handler: WatchHandler) -> Result<(), QueueError> {
-        // Polling fallback — no external dependency required.
-        //
-        // Drain anything already present before entering the poll loop,
-        // so jobs that arrived before watch() was called are not lost
-        // (mirrors the drain-before-block in the --features watch path).
-        for (job, session_id) in self.drain_available()? {
-            handler(job, session_id)?;
-        }
-
-        loop {
-            std::thread::sleep(WATCH_POLL_INTERVAL);
-            // Each tick is treated as a wake hint; drain_available() is the
-            // authority on what is actually claimable. Spurious ticks that find
-            // new/ empty drain to nothing and loop back. A drain error propagates
-            // fail-closed (SPEC §5 B-3): a storage fault is not silently treated
-            // as an empty queue.
-            let pairs = self.drain_available()?;
-            for (job, session_id) in pairs {
-                handler(job, session_id)?;
-            }
-        }
+        // No-watch build: poll_watch_loop is the sole implementation.
+        self.poll_watch_loop(handler)
     }
 }
 

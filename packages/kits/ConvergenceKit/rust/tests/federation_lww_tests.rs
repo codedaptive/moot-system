@@ -12,9 +12,9 @@
 //   4. newer_delete_wins: a delete whose HLC is >= the local row's _syncHLC
 //      must hard-delete the local row.
 //
-// apply_record is tested directly via a two-peer push/pull path where record
-// HLCs are explicitly set in the enqueued SyncRecord, giving full HLC control
-// without relying on wall-clock timing.
+// apply_record is reached indirectly via the public enqueue/push/pull path;
+// record HLCs are explicitly set in the enqueued SyncRecord, giving full
+// HLC control without relying on wall-clock timing.
 //
 // This mirrors FederationLWWTests.swift — all four force-test cases and their
 // assertions must match across both ports.

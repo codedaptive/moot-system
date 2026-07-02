@@ -3,13 +3,16 @@
 // Tests for EstateConfiguration.queueSibling(filename:) — ADR-021 T3.
 //
 // Coverage:
-//   1. SQLite estate: sibling is at <estate-dir>/<filename>, same busyTimeout,
-//      encryptionConfig carried over (mode, keyIdentifier), sibling estateID
-//      differs from parent, two calls produce equal configs (determinism).
-//   2. InMemory estate: sibling is InMemory, deterministic sibling ID.
-//   3. PostgreSQL estate: sibling throws StorageError.featureGated (deferred path),
+//   1. SQLite estate: sibling is at <estate-dir>/<estate-stem>.<filename>,
+//      same busyTimeout, encryptionConfig carried over (mode, keyIdentifier),
+//      sibling estateID differs from parent, two calls produce equal configs
+//      (determinism).
+//   2. Cross-estate isolation: two distinct estate DB files in the SAME
+//      directory produce DIFFERENT sibling paths.
+//   3. InMemory estate: sibling is InMemory, deterministic sibling ID.
+//   4. PostgreSQL estate: sibling throws StorageError.featureGated (deferred path),
 //      never returns a silent wrong config.
-//   4. Determinism: repeated calls on the same input return equal configs.
+//   5. Determinism: repeated calls on the same input return equal configs.
 
 import Testing
 import Foundation
@@ -21,8 +24,9 @@ struct EstateConfigurationQueueSiblingTests {
     // SQLite backend
     // ──────────────────────────────────────────────────────────────────────
 
-    /// SQLite sibling lands in the same directory as the estate DB, with
-    /// only the filename leaf replaced by `filename`.
+    /// SQLite sibling lands in the same directory as the estate DB, with the
+    /// sibling filename derived from the estate's own file stem + the requested
+    /// filename (`<stem>.<filename>`). This isolates estates sharing a directory.
     @Test func sqliteSiblingPathIsInSameDirectory() throws {
         let dir = URL(fileURLWithPath: "/tmp/estates")
         let estateURL = dir.appendingPathComponent("estate.sqlite")
@@ -44,8 +48,63 @@ struct EstateConfigurationQueueSiblingTests {
         let siblingDir = url.deletingLastPathComponent().standardizedFileURL.path
         let expectedDir = dir.standardizedFileURL.path
         #expect(siblingDir == expectedDir)
-        // Filename is exactly what was requested.
-        #expect(url.lastPathComponent == "queue.sqlite")
+        // Sibling filename is <estate-stem>.<filename> — NOT the bare filename.
+        // Estate stem "estate" + filename "queue.sqlite" → "estate.queue.sqlite".
+        #expect(url.lastPathComponent == "estate.queue.sqlite")
+    }
+
+    /// Two distinct estate DB files in the SAME directory produce DIFFERENT
+    /// sibling paths — the core ADR-021 Decision 7 isolation invariant.
+    /// Before this fix both derived the same `<dir>/queue.sqlite`, enabling
+    /// cross-estate corpus disclosure. After the fix each estate's queue is
+    /// at `<dir>/<estate-stem>.queue.sqlite`, which is unique per estate.
+    @Test func twoEstatesInSameDirectoryGetDifferentSiblingPaths() throws {
+        let dir = URL(fileURLWithPath: "/tmp/shared-estates")
+        let uuidA = UUID()
+        let uuidB = UUID()
+        let estateA = EstateConfiguration(
+            estateID: uuidA,
+            backend: .sqlite(url: dir.appendingPathComponent("\(uuidA.uuidString).sqlite"))
+        )
+        let estateB = EstateConfiguration(
+            estateID: uuidB,
+            backend: .sqlite(url: dir.appendingPathComponent("\(uuidB.uuidString).sqlite"))
+        )
+
+        let siblingA = try estateA.queueSibling(filename: "queue.sqlite")
+        let siblingB = try estateB.queueSibling(filename: "queue.sqlite")
+
+        guard case let .sqlite(urlA, _) = siblingA.backend,
+              case let .sqlite(urlB, _) = siblingB.backend else {
+            Issue.record("Expected .sqlite backend on both siblings")
+            return
+        }
+        // Sibling paths must differ — different estates, same directory.
+        #expect(urlA != urlB, "Two estates in the same dir must produce different queue sibling paths")
+        // Both siblings must still be IN the same parent directory.
+        let dirA = urlA.deletingLastPathComponent().standardizedFileURL.path
+        let dirB = urlB.deletingLastPathComponent().standardizedFileURL.path
+        let expectedDir = dir.standardizedFileURL.path
+        #expect(dirA == expectedDir)
+        #expect(dirB == expectedDir)
+    }
+
+    /// The same estate DB produces the same sibling path across repeated calls
+    /// (all processes that open the same estate share one queue file).
+    @Test func sameEstateSameSiblingPath() throws {
+        let estateURL = URL(fileURLWithPath: "/tmp/estates/shared-estate.sqlite")
+        let estateID = UUID()
+        let config = EstateConfiguration(estateID: estateID, backend: .sqlite(url: estateURL))
+
+        let first  = try config.queueSibling(filename: "queue.sqlite")
+        let second = try config.queueSibling(filename: "queue.sqlite")
+
+        guard case let .sqlite(url1, _) = first.backend,
+              case let .sqlite(url2, _) = second.backend else {
+            Issue.record("Expected .sqlite backends")
+            return
+        }
+        #expect(url1 == url2, "Same estate must produce identical sibling paths across calls")
     }
 
     /// `busyTimeout` from the estate config is preserved on the sibling.

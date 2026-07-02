@@ -2,14 +2,15 @@
 //
 // Parity force-tests for the observer-driven outbox auto-population.
 //
-// These mirror FederationObserverOutboxTests.swift one-for-one and assert
-// IDENTICAL behavior across both ports:
+// These mirror FederationObserverOutboxTests.swift for cases 1 and 3;
+// case 2 (explicit_enqueue_still_works) is a Rust-only regression test
+// with no Swift analogue (the Swift file documents this explicitly):
 //   1. write_auto_populates_outbox: an insert/update/delete to a
 //      federation-enabled estate auto-populates the outbox WITHOUT any
 //      explicit `enqueue` call — push then delivers the record to the peer.
 //   2. explicit_enqueue_still_works: the explicit `enqueue` entry point
 //      remains a working path (regression — it was the only path before
-//      the observer wiring landed).
+//      the observer wiring landed). Rust-only; no Swift mirror.
 //   3. disable_stops_auto_population: after `disable`, a later write does
 //      NOT auto-populate the outbox (lifecycle: workers stopped, no leak).
 //

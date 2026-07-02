@@ -1,9 +1,9 @@
 // FederationJSONConformanceTests.swift
 //
 // Golden JSON vector tests verifying the cross-port wire contract.
-// Every JSON string here is byte-identical to what the Rust port
-// produces via serde_json. If either port changes its encoding,
-// these tests break.
+// These tests use handwritten JSON literals and inspect selected decoded
+// Swift fields or key presence; they do not invoke the Rust port directly
+// or compare Swift output against Rust bytes byte-for-byte.
 
 import Testing
 import Foundation
@@ -189,7 +189,7 @@ struct FederationJSONConformanceTests {
     }
 
     /// Round-trip: decode a Rust-produced SyncValueBox array covering
-    /// text, int, null, and bool.
+    /// text, int, null, bool, bitmap, float, and timestamp (seven types).
     @Test("SyncValueBox round-trips Rust golden JSON for common types")
     func syncValueBoxDecodeRustGolden() throws {
         let golden = """

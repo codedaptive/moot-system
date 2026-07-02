@@ -243,6 +243,162 @@ final class FilesystemBackendTests {
         #expect(try await kit.backend.pendingCount() == 0)
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // File-mode verification
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Queue files must be created with mode 0600 (owner read/write only).
+    /// Queue files carry encoded job payloads that may include sensitive
+    /// estate content, so world-readable (0644) permissions are a
+    /// defense-in-depth failure. This test sends one job and verifies that
+    /// the resulting file in the `new/` maildir slot has exactly mode 0600.
+    ///
+    /// Note: this test is Unix-only; Windows has no equivalent octal
+    /// it is only compiled and run on Apple platforms.
+    #if canImport(Darwin)
+    @Test func queueFilesCreatedWithMode0600() async throws {
+        let kit = try makeKit()
+        let job = Job(
+            id: JobID.generate(),
+            streamID: StreamID(rawValue: "mode-check"),
+            submittedAt: HLC(physicalTime: 1, logicalCount: 0, nodeID: 1),
+            priority: 50,
+            payload: Data("mode-test".utf8),
+            extensions: [:])
+        try await kit.send(job)
+
+        // Exactly one file should be in new/ after a single send.
+        let newDir = root.appendingPathComponent("new").path
+        let names = (try FileManager.default.contentsOfDirectory(atPath: newDir))
+        #expect(names.count == 1, "Expected exactly one file in new/ after send")
+        guard let name = names.first else { return }
+
+        let filePath = (newDir as NSString).appendingPathComponent(name)
+        var st = stat()
+        let rc = stat(filePath, &st)
+        #expect(rc == 0, "stat(\(filePath)) failed: \(errno)")
+        let mode = st.st_mode & 0o7777
+        #expect(
+            mode == 0o600,
+            "Queue file mode was \(String(mode, radix: 8)) — expected 0600 (owner r/w only)"
+        )
+    }
+    #endif
+
+    // MARK: - Identifier validation (CAND-023 planned security hardening)
+
+    /// Helper: build a minimal Job using the given rawStreamID and rawJobID.
+    private func makeJob(streamID: String, jobID: String) -> Job {
+        Job(
+            id: JobID(rawValue: jobID),
+            streamID: StreamID(rawValue: streamID),
+            submittedAt: HLC(physicalTime: 1, logicalCount: 0, nodeID: 1),
+            priority: 50, payload: Data(), extensions: [:])
+    }
+
+    @Test func rejectsDotDotStreamID() async throws {
+        // ".." as a stream_id would allow escaping the queue root via path
+        // traversal when embedded in the job filename.
+        let fs = try FilesystemBackend(
+            root: root, hlcGenerator: HLCGenerator(nodeID: 1))
+        let job = makeJob(streamID: "..", jobID: JobID.generate().rawValue)
+        await #expect(throws: QueueError.self) {
+            try await fs.write(job)
+        }
+    }
+
+    @Test func rejectsDotDotJobID() async throws {
+        // ".." as a job id would allow escaping the queue root in signal
+        // file names (e.g. "..".signal resolved against done/).
+        let fs = try FilesystemBackend(
+            root: root, hlcGenerator: HLCGenerator(nodeID: 1))
+        let job = makeJob(
+            streamID: "encode", jobID: "..")
+        await #expect(throws: QueueError.self) {
+            try await fs.write(job)
+        }
+    }
+
+    @Test func rejectsForwardSlashInStreamID() async throws {
+        // A stream_id containing "/" would inject a directory separator
+        // into the job filename component, allowing path escape.
+        let fs = try FilesystemBackend(
+            root: root, hlcGenerator: HLCGenerator(nodeID: 1))
+        let job = makeJob(streamID: "evil/stream", jobID: JobID.generate().rawValue)
+        await #expect(throws: QueueError.self) {
+            try await fs.write(job)
+        }
+    }
+
+    @Test func rejectsBackslashInJobID() async throws {
+        // A job id containing "\" would inject a Windows path separator
+        // into the signal filename.
+        let fs = try FilesystemBackend(
+            root: root, hlcGenerator: HLCGenerator(nodeID: 1))
+        let job = makeJob(
+            streamID: "encode", jobID: "bad\\id")
+        await #expect(throws: QueueError.self) {
+            try await fs.write(job)
+        }
+    }
+
+    @Test func rejectsAbsolutePathAsStreamID() async throws {
+        // An absolute path as stream_id starts with "/" — caught by the
+        // path-separator check (any "/" makes it unsafe, including a leading one).
+        let fs = try FilesystemBackend(
+            root: root, hlcGenerator: HLCGenerator(nodeID: 1))
+        let job = makeJob(streamID: "/etc/passwd", jobID: JobID.generate().rawValue)
+        await #expect(throws: QueueError.self) {
+            try await fs.write(job)
+        }
+    }
+
+    @Test func rejectsControlCharacterInJobID() async throws {
+        // Control characters (0x00–0x1F) in a job id could produce filenames
+        // that are difficult to inspect and may trigger OS-level issues.
+        let fs = try FilesystemBackend(
+            root: root, hlcGenerator: HLCGenerator(nodeID: 1))
+        let job = makeJob(
+            streamID: "encode", jobID: "bad\u{01}id")
+        await #expect(throws: QueueError.self) {
+            try await fs.write(job)
+        }
+    }
+
+    @Test func acceptsLegitimateIdentifiers() async throws {
+        let fs = try FilesystemBackend(
+            root: root, hlcGenerator: HLCGenerator(nodeID: 1))
+        let job = makeJob(
+            streamID: "encode-corpus",
+            jobID: JobID.generate().rawValue)
+        // Must not throw — legitimate identifiers pass through cleanly.
+        try await fs.write(job)
+        let claimed = try await fs.drainAvailable()
+        #expect(claimed.count == 1)
+    }
+
+    @Test func rejectsDotDotJobIDOnComplete() async throws {
+        // Validation in complete() prevents a bad job id from reaching
+        // the signal file path construction in done/.
+        let fs = try FilesystemBackend(
+            root: root, hlcGenerator: HLCGenerator(nodeID: 1))
+        await #expect(throws: QueueError.self) {
+            try await fs.complete(
+                JobID(rawValue: ".."),
+                status: .done, artifacts: [])
+        }
+    }
+
+    @Test func rejectsForwardSlashJobIDOnComplete() async throws {
+        let fs = try FilesystemBackend(
+            root: root, hlcGenerator: HLCGenerator(nodeID: 1))
+        await #expect(throws: QueueError.self) {
+            try await fs.complete(
+                JobID(rawValue: "a/b"),
+                status: .done, artifacts: [])
+        }
+    }
+
     // MARK: - helpers
 
     private func filesIn(_ sub: String) -> [String] {

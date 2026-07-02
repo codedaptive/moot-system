@@ -48,8 +48,15 @@ impl QueueLatencyWindow {
     }
 
     /// Returns the p-th percentile (0–100) of the current window.
-    /// Returns 0 when empty.
+    /// Returns 0 when empty or when `p` is non-finite / out of range.
+    ///
+    /// P7-secfix: a NaN or out-of-range `p` caused `as usize` to saturate
+    /// or wrap (UB in debug). Guard added before the index computation mirrors
+    /// the Swift P7 guard (`p.isFinite && p >= 0 && p <= 100`).
     pub fn percentile(&self, p: f64) -> f64 {
+        if !p.is_finite() || p < 0.0 || p > 100.0 {
+            return 0.0;
+        }
         if self.samples.is_empty() {
             return 0.0;
         }
@@ -384,5 +391,40 @@ impl<B: QueueBackend> QueueKit<B> {
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QueueLatencyWindow;
+
+    // P7-secfix: NaN / infinity / out-of-range p must return 0.0 without
+    // panic or saturation. The old impl did `as usize` directly on the
+    // f64 index which is UB-adjacent behavior for NaN/inf inputs.
+    #[test]
+    fn percentile_nan_and_infinity_return_zero() {
+        let mut w = QueueLatencyWindow::new(100);
+        w.append(10.0);
+        w.append(20.0);
+
+        // Non-finite inputs.
+        assert_eq!(w.percentile(f64::NAN), 0.0, "percentile(NaN) must return 0");
+        assert_eq!(w.percentile(f64::INFINITY), 0.0, "percentile(+inf) must return 0");
+        assert_eq!(w.percentile(f64::NEG_INFINITY), 0.0, "percentile(-inf) must return 0");
+
+        // Out-of-range inputs.
+        assert_eq!(w.percentile(-1.0), 0.0, "percentile(-1) must return 0");
+        assert_eq!(w.percentile(101.0), 0.0, "percentile(101) must return 0");
+
+        // Boundary values must still work correctly.
+        assert_eq!(w.percentile(0.0), 10.0, "percentile(0) must return the minimum sample");
+        assert_eq!(w.percentile(100.0), 20.0, "percentile(100) must return the maximum sample");
+    }
+
+    #[test]
+    fn percentile_empty_window_returns_zero_regardless_of_p() {
+        let w = QueueLatencyWindow::new(100);
+        assert_eq!(w.percentile(50.0), 0.0);
+        assert_eq!(w.percentile(f64::NAN), 0.0);
     }
 }

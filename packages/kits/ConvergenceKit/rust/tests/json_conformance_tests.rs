@@ -1,7 +1,7 @@
 //! Golden JSON vector tests verifying the cross-port wire contract.
-//! Every JSON string here is byte-identical to what the Swift port
-//! produces via JSONEncoder. If either port changes its encoding,
-//! these tests break.
+//! These tests use a mix of handwritten golden strings, decoded-field
+//! assertions, and substring checks; they do not compare every Rust
+//! JSON string byte-for-byte against Swift JSONEncoder output.
 
 use std::collections::BTreeMap;
 use convergence_kit::{

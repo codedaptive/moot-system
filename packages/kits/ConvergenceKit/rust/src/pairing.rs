@@ -1,10 +1,10 @@
-//! Federation pairing types. Pairing handshake per paper section
-//! 9.2. Two estates negotiate a shared hyperplane family so
-//! their 256-bit fingerprints are directly comparable across the
-//! federation.
+//! Federation pairing value types (paper section 9.2). Two estates
+//! share a hyperplane family so their 256-bit fingerprints are directly
+//! comparable across the federation.
 //!
-//! For v1.0 the handshake exchanges family parameters (seed +
-//! dimension) signed by each peer's Ed25519 key.
+//! This module defines the Codable proposal/acceptance types and a
+//! canonical byte helper. It does not implement negotiation, signing,
+//! or verification; those are caller responsibilities.
 
 use serde::{Deserialize, Serialize};
 
@@ -48,7 +48,8 @@ pub struct PairingAcceptance {
 
 /// Canonical byte encoding of a PairingProposal for signing.
 /// Both peers MUST produce the same bytes; ordering and width
-/// are explicit here. Mirrors the Swift convention.
+/// are explicit here. There is no Swift proposal-signing-bytes
+/// helper to mirror; the Swift types are Codable value types only.
 pub fn proposal_signing_bytes(proposal: &PairingProposal) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(
         proposal.proposer_public_key.len() + 8 + 4 + proposal.nonce.len(),

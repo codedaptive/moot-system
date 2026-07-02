@@ -1,9 +1,11 @@
 // CachingRowStoreTemporalTests.swift
 //
 // NT-P4 — temporal cache key isolation and parent-chain invalidation.
-// Verifies that present reads and as-of snapshot reads of the same row
-// are distinct cache entries, and that a write with a registered parent
-// chain callback evicts cached aggregates for the parent chain.
+// Verifies that as-of queries return a featureGated error (ungated path
+// not yet implemented) so the present-vs-as-of cache-key distinction is
+// proved by isolation, not by two populated entries. Also verifies that
+// a write with a registered parent-chain callback evicts cached aggregates
+// for the parent chain.
 
 import Testing
 import Foundation

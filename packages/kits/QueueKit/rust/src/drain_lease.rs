@@ -151,12 +151,24 @@ impl DrainLease {
 
     fn write(&self, now_secs: f64) {
         let body = format!("{}\n{}", self.owner, now_secs);
-        // Atomic replace: write a per-writer temp then rename (atomic within the
-        // directory) so a concurrent reader never sees a torn file, and concurrent
-        // claimers resolve to one last-writer winner. Per-owner tmp path prevents
-        // two writers from clobbering each other's temp mid-rename.
+        // Atomic replace: write a per-writer temp then rename so a concurrent
+        // reader never sees a torn file. Per-owner tmp path prevents two
+        // concurrent writers from clobbering each other's temp mid-rename.
+        //
+        // P9-secfix (Windows): std::fs::rename returns Err when the destination
+        // already exists on Windows (ERROR_ALREADY_EXISTS / ERROR_ACCESS_DENIED).
+        // POSIX guarantees an atomic replace. Work around the Windows gap:
+        // attempt rename; on failure remove the stale destination and retry.
+        // This is not fully atomic on Windows (window between remove and rename)
+        // but is the idiomatic cross-platform approximation — the same window
+        // exists in every Windows file-copy utility. On POSIX the first rename
+        // always succeeds and the retry branch is dead code.
         if std::fs::write(&self.tmp_path, body.as_bytes()).is_ok() {
-            let _ = std::fs::rename(&self.tmp_path, &self.lease_path);
+            if std::fs::rename(&self.tmp_path, &self.lease_path).is_err() {
+                // Windows fallback: remove stale destination before rename.
+                let _ = std::fs::remove_file(&self.lease_path);
+                let _ = std::fs::rename(&self.tmp_path, &self.lease_path);
+            }
         }
     }
 }

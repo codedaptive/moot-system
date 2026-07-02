@@ -1,14 +1,17 @@
 //! Tests for `EstateConfiguration::queue_sibling` — ADR-021 T3.
 //!
 //! Coverage:
-//!   1. SQLite estate: sibling is at `<estate-dir>/<filename>`, same
-//!      busy_timeout_secs, encryption_config carried over (mode, key
+//!   1. SQLite estate: sibling is at `<estate-dir>/<estate-stem>.<filename>`,
+//!      same busy_timeout_secs, encryption_config carried over (mode, key
 //!      identifier), sibling estate_id differs from parent.
-//!   2. InMemory estate: sibling is InMemory, deterministic sibling ID.
-//!   3. PostgreSQL estate: queue_sibling returns StorageError::FeatureGated
+//!   2. Cross-estate isolation: two distinct estate DB files in the SAME
+//!      directory produce DIFFERENT sibling paths (the core security invariant).
+//!   3. Same estate → same sibling path across repeated calls (determinism).
+//!   4. InMemory estate: sibling is InMemory, deterministic sibling ID.
+//!   5. PostgreSQL estate: queue_sibling returns StorageError::FeatureGated
 //!      (deferred path), never a silent wrong config.
-//!   4. Determinism: repeated calls on the same input return equal configs.
-//!   5. Different filenames → different sibling IDs.
+//!   6. Determinism: repeated calls on the same input return equal configs.
+//!   7. Different filenames → different sibling IDs.
 //!
 
 use persistence_kit::{
@@ -19,8 +22,9 @@ use persistence_kit::{
 // SQLite backend
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// SQLite sibling lands in the same directory as the estate DB, with only the
-/// filename leaf replaced by `filename`.
+/// SQLite sibling lands in the same directory as the estate DB, with the
+/// sibling filename derived from the estate's own file stem + the requested
+/// filename (`<stem>.<filename>`). This isolates estates sharing a directory.
 #[test]
 fn sqlite_sibling_path_is_in_same_directory() {
     let parent_id = uuid::Uuid::new_v4();
@@ -36,12 +40,13 @@ fn sqlite_sibling_path_is_in_same_directory() {
 
     match &sibling.backend {
         BackendConfiguration::Sqlite { path, .. } => {
-            // Path must end with the requested filename.
+            // Sibling filename is <estate-stem>.<filename> — NOT the bare filename.
+            // Estate stem "estate" + filename "queue.sqlite" → "estate.queue.sqlite".
             assert!(
-                path.ends_with("/queue.sqlite"),
-                "expected sibling path to end with /queue.sqlite, got: {path}"
+                path.ends_with("/estate.queue.sqlite"),
+                "expected sibling path to end with /estate.queue.sqlite, got: {path}"
             );
-            // Directory must be /tmp/estates.
+            // Directory must still be /tmp/estates.
             let parent = std::path::Path::new(path)
                 .parent()
                 .expect("sibling path has a parent dir")
@@ -50,6 +55,85 @@ fn sqlite_sibling_path_is_in_same_directory() {
             assert_eq!(parent, "/tmp/estates");
         }
         other => panic!("expected Sqlite backend on sibling, got {other:?}"),
+    }
+}
+
+/// Two distinct estate DB files in the SAME directory produce DIFFERENT
+/// sibling paths — the core ADR-021 Decision 7 isolation invariant.
+/// Before this fix both derived the same `<dir>/queue.sqlite`, enabling
+/// cross-estate corpus disclosure. After the fix each estate's queue is
+/// at `<dir>/<estate-stem>.queue.sqlite`, unique per estate.
+#[test]
+fn two_estates_in_same_directory_get_different_sibling_paths() {
+    let uuid_a = uuid::Uuid::new_v4();
+    let uuid_b = uuid::Uuid::new_v4();
+    let config_a = EstateConfiguration::new(
+        uuid_a,
+        BackendConfiguration::Sqlite {
+            path: format!("/tmp/shared-estates/{}.sqlite", uuid_a),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let config_b = EstateConfiguration::new(
+        uuid_b,
+        BackendConfiguration::Sqlite {
+            path: format!("/tmp/shared-estates/{}.sqlite", uuid_b),
+            busy_timeout_secs: 5.0,
+        },
+    );
+
+    let sibling_a = config_a.queue_sibling("queue.sqlite")
+        .expect("queue_sibling must not fail for SQLite");
+    let sibling_b = config_b.queue_sibling("queue.sqlite")
+        .expect("queue_sibling must not fail for SQLite");
+
+    match (&sibling_a.backend, &sibling_b.backend) {
+        (
+            BackendConfiguration::Sqlite { path: path_a, .. },
+            BackendConfiguration::Sqlite { path: path_b, .. },
+        ) => {
+            // Sibling paths must differ — different estates, same directory.
+            assert_ne!(
+                path_a, path_b,
+                "Two estates in the same dir must produce different queue sibling paths.\n\
+                 path_a={path_a}\npath_b={path_b}"
+            );
+            // Both siblings must still be in the same parent directory.
+            let dir_a = std::path::Path::new(path_a)
+                .parent().expect("sibling_a has parent").to_string_lossy().into_owned();
+            let dir_b = std::path::Path::new(path_b)
+                .parent().expect("sibling_b has parent").to_string_lossy().into_owned();
+            assert_eq!(dir_a, "/tmp/shared-estates");
+            assert_eq!(dir_b, "/tmp/shared-estates");
+        }
+        other => panic!("expected Sqlite backends on both siblings, got {other:?}"),
+    }
+}
+
+/// The same estate DB produces the same sibling path across repeated calls
+/// (all processes that open the same estate share one queue file per ADR-021 D7).
+#[test]
+fn same_estate_same_sibling_path() {
+    let estate_id = uuid::Uuid::new_v4();
+    let config = EstateConfiguration::new(
+        estate_id,
+        BackendConfiguration::Sqlite {
+            path: "/tmp/estates/shared-estate.sqlite".to_owned(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+
+    let first  = config.queue_sibling("queue.sqlite").unwrap();
+    let second = config.queue_sibling("queue.sqlite").unwrap();
+
+    match (&first.backend, &second.backend) {
+        (
+            BackendConfiguration::Sqlite { path: p1, .. },
+            BackendConfiguration::Sqlite { path: p2, .. },
+        ) => {
+            assert_eq!(p1, p2, "Same estate must produce identical sibling paths across calls");
+        }
+        _ => panic!("expected Sqlite backends on both calls"),
     }
 }
 

@@ -148,9 +148,10 @@ impl DirtySet {
 
     /// Record a change for replication.
     ///
-    /// Inserts and updates both dirty the row. Deletes are recorded as a
-    /// tombstone sentinel (same DirtyKey) — the sync path issues a delete
-    /// on the destination for the given PK when the re-scan finds no row.
+    /// Inserts, updates, and deletes all add the same DirtyKey — there is no
+    /// tombstone sentinel type. At sync time the re-scan determines intent:
+    /// if the source row is absent, the sync path issues a delete on the
+    /// destination for the given PK.
     ///
     /// If the TableChange's values dict does not contain all PK columns,
     /// the change is silently skipped (defensive; a conforming backend always
@@ -1537,7 +1538,7 @@ pub(crate) mod tests_helpers {
             after_operational: 0,
             after_provenance: 0,
             before_lattice_anchor: None,
-            after_lattice_anchor: 0,
+            after_lattice_anchor: 0, before_lattice_qid: None, after_lattice_qid: 0,
             actor: "test".into(),
             reason: None,
         }

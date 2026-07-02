@@ -133,6 +133,37 @@ public final class HashingRowStore: RowStore, @unchecked Sendable {
         values: [String: TypedValue],
         conflictColumns: [String]
     ) async throws -> RowHandle {
+        // For hashable tables, detect whether this upsert will hit an existing
+        // row (update path) or insert a new row. If it's an update, hash the
+        // full committed row (current columns merged with incoming values) rather
+        // than just the incoming values dict, which omits unchanged columns
+        // (SECFIX-WS2-PK F6).
+        //
+        // The conflict column is typically "id" (UUID primary key). We build a
+        // point-lookup predicate from the first conflict column value to find
+        // the existing row; if found, merge and hash from the merged state.
+        if config.hashableTables.contains(table),
+           let firstConflictCol = conflictColumns.first,
+           let conflictValue = values[firstConflictCol],
+           case .uuid(let rowKey) = conflictValue {
+            let eqPred = StoragePredicate.eq(Column(table: table, name: firstConflictCol), conflictValue)
+            let existing = try await backing.query(
+                table: table, where: eqPred, orderBy: [], limit: 1, offset: nil)
+            if let currentRow = existing.first {
+                // Upsert resolves to an update: merge incoming values over current row.
+                var merged = currentRow.values
+                for (k, v) in values { merged[k] = v }
+                let augmented = augmentWithHashForKnownKey(table: table, rowKey: rowKey, mergedValues: merged)
+                let handle = try await backing.upsert(
+                    table: table, values: augmented.values, conflictColumns: conflictColumns)
+                if let hashResult = augmented.hashResult {
+                    await emitDirtyChain(table: table, rowKey: handle.key, hashResult: hashResult)
+                }
+                return handle
+            }
+        }
+        // Insert path (no existing row) or non-hashable table: incoming values
+        // IS the full row, so the existing augment logic is correct.
         let augmented = augmentWithHash(table: table, values: values)
         let handle = try await backing.upsert(
             table: table, values: augmented.values, conflictColumns: conflictColumns)
@@ -148,6 +179,32 @@ public final class HashingRowStore: RowStore, @unchecked Sendable {
         values: [String: TypedValue],
         where predicate: StoragePredicate
     ) async throws -> Int {
+        // For hashable tables with a single-row UUID predicate, hash the full
+        // committed row (current columns merged with the SET values) rather than
+        // just the partial SET-column dict (SECFIX-WS2-PK F6). Without pre-reading,
+        // the hash omits all unchanged columns, producing a hash for a partial
+        // row that diverges from the actual committed row state.
+        //
+        // Batch updates (no single-row UUID predicate) still use the existing
+        // augment path: the consuming kit is responsible for re-hashing affected
+        // rows (consistent with CachingRowStore's batch-invalidation model).
+        if config.hashableTables.contains(table),
+           let rowKey = extractSingleRowKey(from: predicate) {
+            let existing = try await backing.query(
+                table: table, where: predicate, orderBy: [], limit: 1, offset: nil)
+            if let currentRow = existing.first {
+                var merged = currentRow.values
+                for (k, v) in values { merged[k] = v }
+                let augmented = augmentWithHashForKnownKey(table: table, rowKey: rowKey, mergedValues: merged)
+                let count = try await backing.update(
+                    table: table, values: augmented.values, where: predicate)
+                if count > 0, let hashResult = augmented.hashResult {
+                    await emitDirtyChain(table: table, rowKey: rowKey, hashResult: hashResult)
+                }
+                return count
+            }
+        }
+        // Non-hashable table or batch update (no single UUID key).
         let augmented = augmentWithHash(table: table, values: values)
         let count = try await backing.update(
             table: table, values: augmented.values, where: predicate)
@@ -224,6 +281,47 @@ public final class HashingRowStore: RowStore, @unchecked Sendable {
     private struct HashResult {
         let contentHash: ContentHash
         let parentChain: (parentNodeId: UUID, grandparentNodeId: UUID)
+    }
+
+    /// Computes a content hash for a hashable table row where the row key is
+    /// already known (from a predicate or conflict-column lookup). Used by
+    /// `update` and `upsert` on the update path, where `mergedValues` is the
+    /// full committed row state after applying SET / incoming values.
+    ///
+    /// Unlike `augmentWithHash`, this variant does not extract the row key from
+    /// the values dict — the caller supplies it directly, allowing correct hash
+    /// computation even when the incoming values dict omits the "id" column
+    /// (e.g. a partial SET dict in an UPDATE statement).
+    private func augmentWithHashForKnownKey(
+        table: String,
+        rowKey: RowKey,
+        mergedValues: [String: TypedValue]
+    ) -> AugmentResult {
+        guard config.hashableTables.contains(table) else {
+            return AugmentResult(values: mergedValues, hashResult: nil)
+        }
+        // Strip the existing `content_hash` from the input before computing the
+        // new hash. The INSERT path (`augmentWithHash`) calls hashProvider with
+        // values that do NOT yet include `content_hash` (it is added afterwards).
+        // Stripping here ensures the hash function always receives the same
+        // column set — the row's data columns — regardless of whether this is an
+        // insert or an update/upsert. Without this strip, the UPDATE path would
+        // hash the old `content_hash` column value along with the data columns,
+        // producing a result that diverges from what the INSERT path would
+        // compute for identical data (SECFIX-WS2-PK F6 consistency).
+        var hashInput = mergedValues
+        hashInput.removeValue(forKey: "content_hash")
+        let contentHash = config.hashProvider(table, rowKey, hashInput)
+        var augmented = mergedValues
+        augmented["content_hash"] = .blob(Data(contentHash.bytes))
+        guard let chain = config.parentChainProvider(table, rowKey) else {
+            hashLogger.debug("Hash-on-write: no parent chain for \(table)/\(rowKey)")
+            return AugmentResult(values: augmented, hashResult: nil)
+        }
+        return AugmentResult(
+            values: augmented,
+            hashResult: HashResult(contentHash: contentHash, parentChain: chain)
+        )
     }
 
     /// Computes the content hash for hashable tables and merges the

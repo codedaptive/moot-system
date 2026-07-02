@@ -2,8 +2,10 @@
 //! target, over the synchronous `postgres` crate (matching the sync Storage
 //! trait). A fixed-size lazy connection pool (matching `PostgreSQLPool.swift`)
 //! guards per-estate connections. Schema DDL, predicate compilation, and the
-//! value codec match the Swift backend so both versions produce identical
-//! observable results.
+//! value codec are designed to match the Swift backend for identical observable
+//! results. Exception: HLC values are decoded via a local `unpack_hlc` bit-split
+//! rather than the Swift `HLC.fromPacked` API; the bit layout is identical so
+//! observable results agree for well-formed HLC values.
 //!
 //! NOTE: this backend is **unverified locally** — its conformance test only
 //! runs when `PERSISTENCEKIT_PG_URL` points at a live PostgreSQL server;
@@ -20,6 +22,9 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use postgres::types::ToSql;
 use postgres::{Client, NoTls};
+use postgres_native_tls::MakeTlsConnector;
+use native_tls::TlsConnector as NativeTlsConnector;
+use crate::postgres_tls::{effective_sslmode, PostgresTlsMode};
 use substrate_types::hlc::HLC;
 use uuid::Uuid;
 
@@ -30,6 +35,7 @@ use crate::{
     Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult,
     StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue,
 };
+use crate::error::validate_sql_identifier;
 // Mode 2 (RowEncryption) content seam — shared with the SQLite backend so the
 // client-side AES-GCM-256 envelope is byte-identical across backends. Postgres
 // has no whole-file analogue (the server owns the schema), so per-row content
@@ -55,9 +61,12 @@ fn to_param(v: &TypedValue) -> PgParam {
         TypedValue::Blob(b) => Box::new(b.clone()),
         TypedValue::Json(b) => Box::new(b.clone()),
         TypedValue::Uuid(u) => Box::new(*u),
-        TypedValue::Timestamp(secs) => Box::new(
-            DateTime::<Utc>::from_timestamp(*secs, 0)
-                .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap()),
+        // Timestamp is epoch MILLISECONDS (ADR-023) — bind through the
+        // millisecond constructor so the TIMESTAMPTZ carries sub-second
+        // precision, matching Swift and the SQLite backend.
+        TypedValue::Timestamp(ms) => Box::new(
+            DateTime::<Utc>::from_timestamp_millis(*ms)
+                .unwrap_or_else(|| DateTime::<Utc>::from_timestamp_millis(0).unwrap()),
         ),
         TypedValue::Hlc(h) => Box::new(h.packed() as i64),
         // Not exercised by Phase-1 conformance.
@@ -104,7 +113,8 @@ fn read_value(row: &postgres::Row, idx: usize, kit: Option<ColumnType>) -> Typed
             .try_get::<_, Option<DateTime<Utc>>>(idx)
             .ok()
             .flatten()
-            .map(|dt| TypedValue::Timestamp(dt.timestamp()))
+            // Timestamp is epoch MILLISECONDS (ADR-023).
+            .map(|dt| TypedValue::Timestamp(dt.timestamp_millis()))
             .unwrap_or(TypedValue::Null),
         Some(ColumnType::Bool) => row
             .try_get::<_, Option<bool>>(idx)
@@ -206,6 +216,8 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
   "after_provenance" BIGINT NOT NULL,
   "before_lattice_anchor" BIGINT,
   "after_lattice_anchor" BIGINT NOT NULL,
+  "before_lattice_qid" BIGINT,
+  "after_lattice_qid" BIGINT NOT NULL DEFAULT 0,
   "actor" TEXT NOT NULL,
   "reason" TEXT,
   PRIMARY KEY ("event_id", "hlc")
@@ -303,67 +315,82 @@ fn create_index_sql(decl: &IndexDeclaration) -> String {
 // Predicate compilation — PostgreSQL $N placeholders.
 // ─────────────────────────────────────────────────────────────────────
 
-fn compile_predicate(p: &StoragePredicate, binds: &mut Vec<TypedValue>) -> String {
+/// Compile a `StoragePredicate` to a parameterized PostgreSQL WHERE clause.
+///
+/// Returns `Err(StorageError::InvalidIdentifier)` if any column name in the
+/// predicate tree contains characters outside `[A-Za-z_][A-Za-z0-9_]*`.
+/// Binds are safe (bound values, never interpolated); only column identifiers
+/// (SECFIX-WS2-PK F7).
+fn compile_predicate(p: &StoragePredicate, binds: &mut Vec<TypedValue>) -> StorageResult<String> {
     // Each pushed bind takes the next positional placeholder ($len).
     match p {
-        StoragePredicate::IsTrue => "TRUE".into(),
-        StoragePredicate::IsFalse => "FALSE".into(),
+        StoragePredicate::IsTrue => Ok("TRUE".into()),
+        StoragePredicate::IsFalse => Ok("FALSE".into()),
         StoragePredicate::And(preds) => {
             if preds.is_empty() {
-                return "TRUE".into();
+                return Ok("TRUE".into());
             }
-            format!(
-                "({})",
-                preds
-                    .iter()
-                    .map(|x| compile_predicate(x, binds))
-                    .collect::<Vec<_>>()
-                    .join(" AND ")
-            )
+            let parts = preds
+                .iter()
+                .map(|x| compile_predicate(x, binds))
+                .collect::<StorageResult<Vec<_>>>()?;
+            Ok(format!("({})", parts.join(" AND ")))
         }
         StoragePredicate::Or(preds) => {
             if preds.is_empty() {
-                return "FALSE".into();
+                return Ok("FALSE".into());
             }
-            format!(
-                "({})",
-                preds
-                    .iter()
-                    .map(|x| compile_predicate(x, binds))
-                    .collect::<Vec<_>>()
-                    .join(" OR ")
-            )
+            let parts = preds
+                .iter()
+                .map(|x| compile_predicate(x, binds))
+                .collect::<StorageResult<Vec<_>>>()?;
+            Ok(format!("({})", parts.join(" OR ")))
         }
-        StoragePredicate::Not(inner) => format!("NOT ({})", compile_predicate(inner, binds)),
+        StoragePredicate::Not(inner) => {
+            Ok(format!("NOT ({})", compile_predicate(inner, binds)?))
+        }
         StoragePredicate::Eq(c, v) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(v.clone());
-            format!("\"{}\" = ${}", c.name, binds.len())
+            Ok(format!("\"{}\" = ${}", c.name, binds.len()))
         }
         StoragePredicate::Neq(c, v) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(v.clone());
-            format!("\"{}\" != ${}", c.name, binds.len())
+            Ok(format!("\"{}\" != ${}", c.name, binds.len()))
         }
         StoragePredicate::Lt(c, v) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(v.clone());
-            format!("\"{}\" < ${}", c.name, binds.len())
+            Ok(format!("\"{}\" < ${}", c.name, binds.len()))
         }
         StoragePredicate::Lte(c, v) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(v.clone());
-            format!("\"{}\" <= ${}", c.name, binds.len())
+            Ok(format!("\"{}\" <= ${}", c.name, binds.len()))
         }
         StoragePredicate::Gt(c, v) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(v.clone());
-            format!("\"{}\" > ${}", c.name, binds.len())
+            Ok(format!("\"{}\" > ${}", c.name, binds.len()))
         }
         StoragePredicate::Gte(c, v) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(v.clone());
-            format!("\"{}\" >= ${}", c.name, binds.len())
+            Ok(format!("\"{}\" >= ${}", c.name, binds.len()))
         }
-        StoragePredicate::IsNull(c) => format!("\"{}\" IS NULL", c.name),
-        StoragePredicate::IsNotNull(c) => format!("\"{}\" IS NOT NULL", c.name),
+        StoragePredicate::IsNull(c) => {
+            validate_sql_identifier(&c.name)?;
+            Ok(format!("\"{}\" IS NULL", c.name))
+        }
+        StoragePredicate::IsNotNull(c) => {
+            validate_sql_identifier(&c.name)?;
+            Ok(format!("\"{}\" IS NOT NULL", c.name))
+        }
         StoragePredicate::In(c, values) => {
+            validate_sql_identifier(&c.name)?;
             if values.is_empty() {
-                return "FALSE".into();
+                return Ok("FALSE".into());
             }
             let ph = values
                 .iter()
@@ -373,35 +400,40 @@ fn compile_predicate(p: &StoragePredicate, binds: &mut Vec<TypedValue>) -> Strin
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("\"{}\" IN ({ph})", c.name)
+            Ok(format!("\"{}\" IN ({ph})", c.name))
         }
         StoragePredicate::Like(c, pattern) => {
+            validate_sql_identifier(&c.name)?;
             binds.push(TypedValue::Text(pattern.clone()));
-            format!("\"{}\" LIKE ${}", c.name, binds.len())
+            Ok(format!("\"{}\" LIKE ${}", c.name, binds.len()))
         }
         StoragePredicate::BitmaskAll { column, mask } => {
+            validate_sql_identifier(&column.name)?;
             binds.push(TypedValue::Int(*mask));
             let a = binds.len();
             binds.push(TypedValue::Int(*mask));
-            format!("(\"{}\" & ${a}) = ${}", column.name, binds.len())
+            Ok(format!("(\"{}\" & ${a}) = ${}", column.name, binds.len()))
         }
         StoragePredicate::BitmaskAny { column, mask } => {
+            validate_sql_identifier(&column.name)?;
             binds.push(TypedValue::Int(*mask));
-            format!("(\"{}\" & ${}) != 0", column.name, binds.len())
+            Ok(format!("(\"{}\" & ${}) != 0", column.name, binds.len()))
         }
         StoragePredicate::BitmaskNone { column, mask } => {
+            validate_sql_identifier(&column.name)?;
             binds.push(TypedValue::Int(*mask));
-            format!("(\"{}\" & ${}) = 0", column.name, binds.len())
+            Ok(format!("(\"{}\" & ${}) = 0", column.name, binds.len()))
         }
         StoragePredicate::BitwiseEq {
             column,
             expected,
             mask,
         } => {
+            validate_sql_identifier(&column.name)?;
             binds.push(TypedValue::Int(*mask));
             let a = binds.len();
             binds.push(TypedValue::Int(*expected));
-            format!("(\"{}\" & ${a}) = ${}", column.name, binds.len())
+            Ok(format!("(\"{}\" & ${a}) = ${}", column.name, binds.len()))
         }
     }
 }
@@ -484,6 +516,36 @@ struct Pool {
     condvar: Condvar,
 }
 
+// ── TLS transport helpers ──────────────────────────────────────────────────
+
+/// Build a default TLS connector backed by the platform TLS stack.
+///
+/// Uses `native_tls::TlsConnector::builder().build()`, which delegates to:
+/// - Security.framework on macOS / iOS
+/// - SChannel on Windows
+/// - OpenSSL (system-installed) on Linux
+///
+/// Certificate verification is enabled by default (the platform trust store
+/// is used). For custom CAs or mutual TLS, extend the builder before calling
+/// `build()`. The connector is intentionally constructed here — one place,
+/// easy to extend — rather than at each call site.
+fn build_tls_connector() -> StorageResult<MakeTlsConnector> {
+    let connector = NativeTlsConnector::builder()
+        .build()
+        .map_err(|e| StorageError::InvalidConfiguration {
+            reason: format!("failed to build TLS connector (native-tls): {e}"),
+        })?;
+    Ok(MakeTlsConnector::new(connector))
+}
+
+// set_sslmode removed — replaced by postgres_tls::effective_sslmode, which
+// computes the effective mode as max(env_rank, dsn_rank) and returns the
+// rewritten connection string. The key security property: the env var may
+// raise the sslmode above the DSN's value but may never lower it. See
+// postgres_tls.rs for the full implementation and the SslModeRank ordering.
+
+// ──────────────────────────────────────────────────────────────────────────
+
 impl Pool {
     fn new(
         connection_string: String,
@@ -510,11 +572,58 @@ impl Pool {
 
     /// Open one new connection and pin it to the estate's schema namespace.
     /// Caller must hold no lock when calling this (it does real I/O).
+    ///
+    /// # TLS transport selection (SECFIX-WS2-PK F3 — CAND-029; c-pg-tls-downgrade)
+    ///
+    /// The effective sslmode is `max(env_rank, dsn_rank)`, computed by
+    /// `effective_sslmode` in `postgres_tls.rs`. This enforces a strict
+    /// no-downgrade rule: the env var (`ARIA_MCP_POSTGRES_TLS`) may raise
+    /// security above what the DSN specifies, but it can never lower an
+    /// operator-specified `sslmode=require` or stronger to `prefer`/`disable`.
+    ///
+    /// Transport selection follows the **effective** mode, not the raw env mode:
+    /// - effective `disable` → `NoTls` (plaintext only — loopback/Unix-socket)
+    /// - effective anything else → `MakeTlsConnector` (platform TLS via
+    ///   `native-tls`; the `sslmode=` in the connection string instructs the
+    ///   `postgres` crate on the exact policy — optional/mandatory/cert-verified).
+    ///
+    /// The critical case fixed by c-pg-tls-downgrade: env=absent(Prefer) +
+    /// DSN `sslmode=require` now correctly preserves `require` (TLS connector,
+    /// no plaintext fallback) instead of silently overwriting it with `prefer`.
+    ///
+    /// Transport is `postgres-native-tls = "0.5"` (C-1 exception approved:
+    /// `DECISION_RUST_POSTGRES_TLS_CRATE_2026-06-28.md`). It wraps the
+    /// platform TLS stack (Security.framework / SChannel / OpenSSL) rather
+    /// than bundling a cryptographic implementation.
     fn open_connection(conn_str: &str, namespace: &str) -> StorageResult<Client> {
-        let mut client =
-            Client::connect(conn_str, NoTls).map_err(|e| StorageError::BackendError {
+        let env_mode = PostgresTlsMode::from_env();
+        // Compute the effective sslmode: max(env rank, DSN rank).
+        // Returns the (possibly-rewritten) connection string and whether to
+        // use a TLS connector. The DSN is the security floor — never overwrite
+        // a stronger operator-specified sslmode with a weaker env default.
+        let (effective_conn_str, use_tls) = effective_sslmode(conn_str, env_mode);
+
+        let mut client = if !use_tls {
+            // Effective mode is disable — plaintext connection. Appropriate only
+            // for loopback or Unix-socket connections where the OS provides
+            // equivalent process isolation to TLS. Note: this path is reached
+            // ONLY when the effective mode (max of env + DSN) is disable; if the
+            // DSN specifies require or higher, effective_sslmode returns use_tls=true
+            // even when env=disable, preventing a plaintext downgrade.
+            Client::connect(&effective_conn_str, NoTls).map_err(|e| StorageError::BackendError {
                 underlying: format!("postgres connect: {e}"),
-            })?;
+            })?
+        } else {
+            // Effective mode is prefer, allow, require, verify-ca, or verify-full.
+            // Supply a TLS-capable connector; the sslmode= in the connection string
+            // instructs the postgres crate on the exact policy (optional fallback vs
+            // mandatory vs certificate-verified). One connector handles all TLS
+            // levels — the policy enforcement comes from the sslmode= parameter.
+            let connector = build_tls_connector()?;
+            Client::connect(&effective_conn_str, connector).map_err(|e| StorageError::BackendError {
+                underlying: format!("postgres connect (TLS): {e}"),
+            })?
+        };
         // Pin search_path to the estate's schema (namespace) so all DDL and
         // DML target the correct per-estate tables. `public` stays on the
         // path so shared extensions (e.g. pgvector) resolve.
@@ -1179,6 +1288,13 @@ impl RowStore for TxRowStore {
         // Postgres (no-op for Plaintext / FullDatabase). Mirrors the SQLite path.
         let values = encrypted_for_write(values, &self.encryption_config, &AesGcmAeadProvider)?;
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name and all column names from the caller-supplied `values` map before
+        // they reach the INSERT column list. Mirrors the SQLite backend guard.
+        validate_sql_identifier(table)?;
+        for k in values.keys() {
+            validate_sql_identifier(k)?;
+        }
         let mut guard = self.conn.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
         let cols = keys
@@ -1219,6 +1335,17 @@ impl RowStore for TxRowStore {
         // Guard: a content-bearing upsert on a Mode 2 estate must already be
         // ciphertext under a keyID (the seam runs on insert, not upsert).
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name, all value-map column names, and the conflict-column list before
+        // interpolating into the INSERT … ON CONFLICT … DO UPDATE SQL.
+        // Mirrors the SQLite backend guard — shared seam, no forked validator.
+        validate_sql_identifier(table)?;
+        for k in values.keys() {
+            validate_sql_identifier(k)?;
+        }
+        for c in conflict_columns {
+            validate_sql_identifier(c)?;
+        }
         let mut guard = self.conn.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
         let cols = keys
@@ -1277,6 +1404,13 @@ impl RowStore for TxRowStore {
         // Guard: a content-bearing update on a Mode 2 estate must carry ciphertext
         // under a keyID, mirroring the SQLite update path.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name and all column names from the caller-supplied `values` map before
+        // they reach the UPDATE SET clause. Mirrors the SQLite backend guard.
+        validate_sql_identifier(table)?;
+        for k in values.keys() {
+            validate_sql_identifier(k)?;
+        }
         let mut guard = self.conn.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
         let mut binds: Vec<TypedValue> = Vec::new();
@@ -1288,7 +1422,8 @@ impl RowStore for TxRowStore {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let where_sql = compile_predicate(predicate, &mut binds);
+        // Predicate column names are validated inside compile_predicate (SECFIX-WS2-PK F7).
+        let where_sql = compile_predicate(predicate, &mut binds)?;
         let sql = format!("UPDATE \"{table}\" SET {set_clause} WHERE {where_sql}");
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
         let changed = guard
@@ -1309,9 +1444,14 @@ impl RowStore for TxRowStore {
     }
 
     fn delete(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name before interpolation. Predicate column names are validated by
+        // compile_predicate (SECFIX-WS2-PK F7).
+        validate_sql_identifier(table)?;
         let mut guard = self.conn.lock().unwrap();
         let mut binds: Vec<TypedValue> = Vec::new();
-        let where_sql = compile_predicate(predicate, &mut binds);
+        // Predicate column names are validated inside compile_predicate (SECFIX-WS2-PK F7).
+        let where_sql = compile_predicate(predicate, &mut binds)?;
         let sql = format!("DELETE FROM \"{table}\" WHERE {where_sql}");
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
         let changed = guard
@@ -1339,23 +1479,33 @@ impl RowStore for TxRowStore {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> StorageResult<Vec<StorageRow>> {
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
+        // the table name before it is interpolated into the SELECT FROM clause.
+        // Predicate and ORDER BY column names are validated at their respective seams.
+        validate_sql_identifier(table)?;
         let mut guard = self.conn.lock().unwrap();
         let mut sql = format!("SELECT * FROM \"{table}\"");
         let mut binds: Vec<TypedValue> = Vec::new();
         if let Some(p) = predicate {
-            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+            // Predicate column names are validated inside compile_predicate
+            // (SECFIX-WS2-PK F7). Propagate rejection before SQL is built.
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)?));
         }
         if !order_by.is_empty() {
+            // SQL-identifier injection guard (SECFIX-WS2-PK F7): validate every
+            // ORDER BY column name before it is interpolated into the SQL string.
+            // Mirrors the guard in Swift PostgreSQLRowStore.queryRows.
             let parts: Vec<String> = order_by
                 .iter()
                 .map(|c| {
+                    validate_sql_identifier(&c.column.name)?;
                     let dir = match c.direction {
                         OrderDirection::Ascending => "ASC",
                         OrderDirection::Descending => "DESC",
                     };
-                    format!("\"{}\" {dir}", c.column.name)
+                    Ok(format!("\"{}\" {dir}", c.column.name))
                 })
-                .collect();
+                .collect::<StorageResult<_>>()?;
             sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
         if let Some(l) = limit {
@@ -1395,13 +1545,25 @@ impl RowStore for TxRowStore {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> StorageResult<Vec<StorageRow>> {
-        // Empty projection means "no projection" — fall back to SELECT *.
+        // `query` validates the table name, so the guard is upheld on the
+        // empty-projection path as well.
         if columns.is_empty() {
             return self.query(table, predicate, order_by, limit, offset);
+        }
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9/F1):
+        // validate the table name and all caller-supplied projection column names
+        // before embedding them in SQL. Double-quoting is insufficient: a name
+        // containing `"` can escape the quoting and alter the query. Reject any
+        // name that is not a safe SQL identifier: [A-Za-z_][A-Za-z0-9_]*.
+        // Table first (F9), then columns (F1).
+        validate_sql_identifier(table)?;
+        for c in columns {
+            validate_sql_identifier(c)?;
         }
         let mut guard = self.conn.lock().unwrap();
         // Explicit column list so the omitted columns (notably the content
         // blob) are never read off disk — the no-blob recall path's I/O win.
+        // Column names are validated and quoted identifiers.
         let select_list = columns
             .iter()
             .map(|c| format!("\"{c}\""))
@@ -1410,19 +1572,24 @@ impl RowStore for TxRowStore {
         let mut sql = format!("SELECT {select_list} FROM \"{table}\"");
         let mut binds: Vec<TypedValue> = Vec::new();
         if let Some(p) = predicate {
-            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+            // Predicate column names are validated inside compile_predicate
+            // (SECFIX-WS2-PK F7). Propagate rejection before SQL is built.
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)?));
         }
         if !order_by.is_empty() {
+            // SQL-identifier injection guard (SECFIX-WS2-PK F7): validate every
+            // ORDER BY column name before it is interpolated. Mirrors query.
             let parts: Vec<String> = order_by
                 .iter()
                 .map(|c| {
+                    validate_sql_identifier(&c.column.name)?;
                     let dir = match c.direction {
                         OrderDirection::Ascending => "ASC",
                         OrderDirection::Descending => "DESC",
                     };
-                    format!("\"{}\" {dir}", c.column.name)
+                    Ok(format!("\"{}\" {dir}", c.column.name))
                 })
-                .collect();
+                .collect::<StorageResult<_>>()?;
             sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
         if let Some(l) = limit {
@@ -1458,7 +1625,9 @@ impl RowStore for TxRowStore {
         let mut sql = format!("SELECT COUNT(*) FROM \"{table}\"");
         let mut binds: Vec<TypedValue> = Vec::new();
         if let Some(p) = predicate {
-            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+            // Predicate column names are validated inside compile_predicate
+            // (SECFIX-WS2-PK F7). Propagate rejection before SQL is built.
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)?));
         }
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
         let row = guard
@@ -1546,8 +1715,8 @@ struct TxAuditLog {
 impl AuditLog for TxAuditLog {
     fn append(&self, event: AuditEvent) -> StorageResult<()> {
         let mut guard = self.conn.lock().unwrap();
-        // 18 columns: original 17 + reason
-        let ph = (1..=18)
+        // 20 columns: original 17 + reason + before/after lattice qid
+        let ph = (1..=20)
             .map(|i| format!("${i}"))
             .collect::<Vec<_>>()
             .join(", ");
@@ -1731,6 +1900,14 @@ impl RowStore for PgRowStore {
         // Postgres (no-op for Plaintext / FullDatabase). Mirrors the SQLite path.
         let values = encrypted_for_write(values, &self.encryption_config, &AesGcmAeadProvider)?;
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name and all column names from the caller-supplied `values` map before
+        // they reach the INSERT column list. Mirrors TxRowStore::insert and the
+        // SQLite backend — shared seam, no forked validator.
+        validate_sql_identifier(table)?;
+        for k in values.keys() {
+            validate_sql_identifier(k)?;
+        }
         let mut conn = self.pool.checkout()?;
         let keys: Vec<&String> = values.keys().collect();
         let cols = keys
@@ -1769,6 +1946,17 @@ impl RowStore for PgRowStore {
         // Guard: a content-bearing upsert on a Mode 2 estate must already be
         // ciphertext under a keyID (the seam runs on insert, not upsert).
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name, all value-map column names, and the conflict-column list before
+        // interpolating into the INSERT … ON CONFLICT … DO UPDATE SQL.
+        // Mirrors TxRowStore::upsert and the SQLite backend.
+        validate_sql_identifier(table)?;
+        for k in values.keys() {
+            validate_sql_identifier(k)?;
+        }
+        for c in conflict_columns {
+            validate_sql_identifier(c)?;
+        }
         let mut conn = self.pool.checkout()?;
         let keys: Vec<&String> = values.keys().collect();
         let cols = keys
@@ -1825,6 +2013,14 @@ impl RowStore for PgRowStore {
         // Guard: a content-bearing update on a Mode 2 estate must carry ciphertext
         // under a keyID, mirroring the SQLite update path.
         assert_content_key_id_invariant(&values, table, &self.encryption_config)?;
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name and all column names from the caller-supplied `values` map before
+        // they reach the UPDATE SET clause. Mirrors TxRowStore::update and the
+        // SQLite backend — shared seam, no forked validator.
+        validate_sql_identifier(table)?;
+        for k in values.keys() {
+            validate_sql_identifier(k)?;
+        }
         let mut conn = self.pool.checkout()?;
         let keys: Vec<&String> = values.keys().collect();
         let mut binds: Vec<TypedValue> = Vec::new();
@@ -1836,7 +2032,8 @@ impl RowStore for PgRowStore {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let where_sql = compile_predicate(predicate, &mut binds);
+        // Predicate column names are validated inside compile_predicate (SECFIX-WS2-PK F7).
+        let where_sql = compile_predicate(predicate, &mut binds)?;
         let sql = format!("UPDATE \"{table}\" SET {set_clause} WHERE {where_sql}");
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
         let changed = conn
@@ -1856,9 +2053,14 @@ impl RowStore for PgRowStore {
     }
 
     fn delete(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name before interpolation. Predicate column names are validated by
+        // compile_predicate (SECFIX-WS2-PK F7).
+        validate_sql_identifier(table)?;
         let mut conn = self.pool.checkout()?;
         let mut binds: Vec<TypedValue> = Vec::new();
-        let where_sql = compile_predicate(predicate, &mut binds);
+        // Predicate column names are validated inside compile_predicate (SECFIX-WS2-PK F7).
+        let where_sql = compile_predicate(predicate, &mut binds)?;
         let sql = format!("DELETE FROM \"{table}\" WHERE {where_sql}");
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
         let changed = conn
@@ -1885,23 +2087,33 @@ impl RowStore for PgRowStore {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> StorageResult<Vec<StorageRow>> {
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
+        // the table name before it is interpolated into the SELECT FROM clause.
+        // Predicate and ORDER BY column names are validated at their respective seams.
+        validate_sql_identifier(table)?;
         let mut conn = self.pool.checkout()?;
         let mut sql = format!("SELECT * FROM \"{table}\"");
         let mut binds: Vec<TypedValue> = Vec::new();
         if let Some(p) = predicate {
-            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+            // Predicate column names are validated inside compile_predicate
+            // (SECFIX-WS2-PK F7). Propagate rejection before SQL is built.
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)?));
         }
         if !order_by.is_empty() {
+            // SQL-identifier injection guard (SECFIX-WS2-PK F7): validate every
+            // ORDER BY column name before it is interpolated into the SQL string.
+            // Mirrors the guard in Swift PostgreSQLRowStore.queryRows.
             let parts: Vec<String> = order_by
                 .iter()
                 .map(|c| {
+                    validate_sql_identifier(&c.column.name)?;
                     let dir = match c.direction {
                         OrderDirection::Ascending => "ASC",
                         OrderDirection::Descending => "DESC",
                     };
-                    format!("\"{}\" {dir}", c.column.name)
+                    Ok(format!("\"{}\" {dir}", c.column.name))
                 })
-                .collect();
+                .collect::<StorageResult<_>>()?;
             sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
         if let Some(l) = limit {
@@ -1941,9 +2153,20 @@ impl RowStore for PgRowStore {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> StorageResult<Vec<StorageRow>> {
-        // Empty projection means "no projection" — fall back to SELECT *.
+        // `query` validates the table name, so the guard is upheld on the
+        // empty-projection path as well.
         if columns.is_empty() {
             return self.query(table, predicate, order_by, limit, offset);
+        }
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9/F1):
+        // validate the table name and every caller-supplied column name against
+        // the safe-identifier allowlist [A-Za-z_][A-Za-z0-9_]* before
+        // interpolating into SQL. Double-quoting alone is insufficient: a name
+        // containing '"' escapes the delimiter and can alter the query.
+        // Table first (F9), then projection columns (F1).
+        validate_sql_identifier(table)?;
+        for c in columns {
+            validate_sql_identifier(c)?;
         }
         let mut conn = self.pool.checkout()?;
         // Explicit column list so the omitted columns (notably the content
@@ -1956,19 +2179,24 @@ impl RowStore for PgRowStore {
         let mut sql = format!("SELECT {select_list} FROM \"{table}\"");
         let mut binds: Vec<TypedValue> = Vec::new();
         if let Some(p) = predicate {
-            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+            // Predicate column names are validated inside compile_predicate
+            // (SECFIX-WS2-PK F7). Propagate rejection before SQL is built.
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)?));
         }
         if !order_by.is_empty() {
+            // SQL-identifier injection guard (SECFIX-WS2-PK F7): validate every
+            // ORDER BY column name before it is interpolated. Mirrors query.
             let parts: Vec<String> = order_by
                 .iter()
                 .map(|c| {
+                    validate_sql_identifier(&c.column.name)?;
                     let dir = match c.direction {
                         OrderDirection::Ascending => "ASC",
                         OrderDirection::Descending => "DESC",
                     };
-                    format!("\"{}\" {dir}", c.column.name)
+                    Ok(format!("\"{}\" {dir}", c.column.name))
                 })
-                .collect();
+                .collect::<StorageResult<_>>()?;
             sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
         }
         if let Some(l) = limit {
@@ -2004,7 +2232,9 @@ impl RowStore for PgRowStore {
         let mut sql = format!("SELECT COUNT(*) FROM \"{table}\"");
         let mut binds: Vec<TypedValue> = Vec::new();
         if let Some(p) = predicate {
-            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+            // Predicate column names are validated inside compile_predicate
+            // (SECFIX-WS2-PK F7). Propagate rejection before SQL is built.
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)?));
         }
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
         let row = conn
@@ -2091,7 +2321,7 @@ struct PgAuditLog {
     pool: Arc<Pool>,
 }
 
-const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adjective","before_operational","before_provenance","after_adjective","after_operational","after_provenance","before_lattice_anchor","after_lattice_anchor","actor","reason""#;
+const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adjective","before_operational","before_provenance","after_adjective","after_operational","after_provenance","before_lattice_anchor","after_lattice_anchor","before_lattice_qid","after_lattice_qid","actor","reason""#;
 
 fn audit_params(e: &AuditEvent) -> Vec<PgParam> {
     vec![
@@ -2111,6 +2341,8 @@ fn audit_params(e: &AuditEvent) -> Vec<PgParam> {
         Box::new(e.after_provenance),
         Box::new(e.before_lattice_anchor.map(|v| v as i64)),
         Box::new(e.after_lattice_anchor as i64),
+        Box::new(e.before_lattice_qid.map(|v| v as i64)),
+        Box::new(e.after_lattice_qid as i64),
         Box::new(e.actor.clone()),
         // reason: None persists as NULL; Some(s) persists as TEXT.
         Box::new(e.reason.clone()),
@@ -2160,17 +2392,19 @@ fn decode_audit(row: &postgres::Row) -> StorageResult<AuditEvent> {
         after_provenance: row.get(13),
         before_lattice_anchor: row.get::<_, Option<i64>>(14).map(|v| v as u64),
         after_lattice_anchor: row.get::<_, i64>(15) as u64,
-        actor: row.get(16),
-        // reason at column index 17; NULL reads back as None.
-        reason: row.get(17),
+        before_lattice_qid: row.get::<_, Option<i64>>(16).map(|v| v as u64),
+        after_lattice_qid: row.get::<_, i64>(17) as u64,
+        actor: row.get(18),
+        // reason at column index 19; NULL reads back as None.
+        reason: row.get(19),
     })
 }
 
 impl AuditLog for PgAuditLog {
     fn append(&self, event: AuditEvent) -> StorageResult<()> {
         let mut conn = self.pool.checkout()?;
-        // 18 columns: original 17 + reason
-        let ph = (1..=18)
+        // 20 columns: original 17 + reason + before/after lattice qid
+        let ph = (1..=20)
             .map(|i| format!("${i}"))
             .collect::<Vec<_>>()
             .join(", ");

@@ -1,10 +1,13 @@
 //! Tests for CachingRowStore and CacheInvalidator.
 //! Mirrors CachingRowStoreTests.swift — both ports must agree on all behaviors.
 //!
-//! Each test proves cache hit/miss by inserting a row into the backing store,
-//! populating the cache via query, deleting directly from backing (bypassing
-//! CachingRowStore), then querying again. A non-empty second result proves a
-//! cache hit; an empty result proves the row was not cached (or was evicted).
+//! Cache-miss/hit and sensitivity tests prove cache behaviour by inserting a
+//! row into the backing store, populating the cache via query, deleting directly
+//! from backing (bypassing CachingRowStore), then querying again. A non-empty
+//! second result proves a cache hit; an empty result proves miss or eviction.
+//! Write-through (update/delete/upsert via CachingRowStore) and observer-driven
+//! invalidation tests work differently: they mutate through the caching layer or
+//! fire a change event and verify the cache is cleared without backing-store deletion.
 
 use crate::cache_config::EstateCacheConfig;
 use crate::cache_invalidator::CacheInvalidator;
@@ -71,10 +74,13 @@ fn make_caching(
     ))
 }
 
-/// Encode a sensitivity level into a provenance column value.
-/// level = (raw >> 4) & 0x7  →  raw = level << 4
+/// Encode a sensitivity ordinal into the provenance bitmap column value.
+/// Ordinals: 0=Normal, 1=Elevated, 2=Restricted, 3=Secret — matching the
+/// `Sensitivity` cases in LocusKit's Provenance.swift. Sensitivity lives in
+/// bits 30–35 of the provenance bitmap (scale-gapped per cookbook §2.5 v0.6:
+/// Normal=0, Elevated=16, Restricted=32, Secret=48).
 fn provenance(level: i64) -> TypedValue {
-    TypedValue::Int(level << 4)
+    TypedValue::Int((level * 16) << 30)  // ordinal → scale-gapped raw at bits 30–35
 }
 
 fn id_predicate(id: uuid::Uuid) -> StoragePredicate {
@@ -276,6 +282,66 @@ fn unparseable_provenance_fails_closed() {
         .query("things", Some(&pred), &[], None, None)
         .unwrap();
     assert_eq!(miss.len(), 0, "unparseable provenance → fail closed");
+}
+
+#[test]
+fn old_bit_position_treated_as_normal_admitted() {
+    // Regression: before the fix, the gate decoded (raw >> 4) & 0x7 (bits [5:4]).
+    // A value of 3 << 4 = 48 would have looked like Secret and been rejected.
+    // After the fix the gate reads bits 30–35; value 48 in the low bits leaves
+    // bits 30–35 as 0 (Normal, ordinal 0), so the row is admitted.
+    let storage = make_storage();
+    let backing = storage.row_store();
+    let caching = make_caching(backing.clone(), 10_000_000, 2);
+
+    let id = uuid::Uuid::new_v4();
+    let pred = id_predicate(id);
+
+    // Old-style encoding: secret level at bits [5:4], NOT at bits 30–35
+    let old_style_secret = TypedValue::Int(3_i64 << 4); // 48, bits 30–35 = 0 (Normal)
+    let mut values = row(id, "old-encoding");
+    values.insert("provenance".to_string(), old_style_secret);
+    backing.insert("things", values).unwrap();
+
+    caching.query("things", Some(&pred), &[], None, None).unwrap();
+    backing.delete("things", &pred).unwrap();
+
+    // bits 30–35 are 0 (Normal) → ordinal 0 ≤ threshold 2 → admitted
+    let result = caching
+        .query("things", Some(&pred), &[], None, None)
+        .unwrap();
+    assert_eq!(
+        result.len(), 1,
+        "bits 30–35 are 0 (Normal) at old-style encoding; row must be admitted"
+    );
+}
+
+#[test]
+fn secret_at_correct_bits_always_rejected() {
+    // Regression: verify the gate reads the right bit field. Secret raw = 48;
+    // at bits 30–35 that is 48_i64 << 30. Must be rejected at any threshold.
+    let storage = make_storage();
+    let backing = storage.row_store();
+    let caching = make_caching(backing.clone(), 10_000_000, 2);
+
+    let id = uuid::Uuid::new_v4();
+    let pred = id_predicate(id);
+
+    let correct_secret = TypedValue::Int(48_i64 << 30); // Secret at bits 30–35
+    let mut values = row(id, "secret-at-correct-bits");
+    values.insert("provenance".to_string(), correct_secret);
+    backing.insert("things", values).unwrap();
+
+    caching.query("things", Some(&pred), &[], None, None).unwrap();
+    backing.delete("things", &pred).unwrap();
+
+    let result = caching
+        .query("things", Some(&pred), &[], None, None)
+        .unwrap();
+    assert_eq!(
+        result.len(), 0,
+        "Secret encoded at bits 30–35 must never be admitted to the cache"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────

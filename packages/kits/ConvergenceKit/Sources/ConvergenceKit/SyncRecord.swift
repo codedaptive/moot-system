@@ -6,7 +6,8 @@
 // (schema version, kit ID, HLC). The receiver decodes, validates
 // schema and kit, and applies the change through its local
 // PersistenceKit. Schema or kit mismatch causes the record to be
-// rejected (queued for retry post-app-update).
+// rejected (SyncError.kitMismatch / .schemaMismatch); no retry queue
+// is present in this layer.
 
 import Foundation
 // ─────────────────────────────────────────────────────────────────
@@ -81,7 +82,7 @@ public enum SyncEventKind: String, Sendable, Codable {
     }
 }
 
-/// Codable wrapper for SubstrateLib.HLC. The packed form is
+/// Codable wrapper for SubstrateTypes.HLC. The packed form is
 /// stable across encoders.
 public struct PackedHLC: Sendable, Codable, Hashable {
     public let physicalTime: Int64
@@ -225,7 +226,25 @@ extension SyncValueBox: Codable {
             try container.encode(v, forKey: .payload)
         case .timestamp(let d):
             // Epoch seconds as Int64, matching Rust's Timestamp(i64).
-            try container.encode(Int64(d.timeIntervalSince1970), forKey: .payload)
+            // Guard against non-finite or out-of-range intervals before the
+            // narrowing cast — Int64(_:) traps on NaN, ±infinity, or any
+            // Double whose magnitude exceeds Int64.max (~9.2e18 seconds,
+            // year 292 billion). Corrupt inbound sync data can produce such
+            // values; we surface a clear encode error rather than a crash.
+            let interval = d.timeIntervalSince1970
+            guard interval.isFinite,
+                  interval >= Double(Int64.min),
+                  interval <= Double(Int64.max) else {
+                throw EncodingError.invalidValue(
+                    interval,
+                    EncodingError.Context(
+                        codingPath: container.codingPath + [CodingKeys.payload],
+                        debugDescription:
+                            "timestamp interval \(interval) is non-finite or out of Int64 range"
+                    )
+                )
+            }
+            try container.encode(Int64(interval), forKey: .payload)
         case .hlc(let v):
             try container.encode(v, forKey: .payload)
         case .fingerprint(let v):

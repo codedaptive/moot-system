@@ -110,6 +110,13 @@ extension SQLiteStorage: StorageIntrospection {
 actor SQLiteBackend {
     let connection: SQLiteConnection
     private var inTransaction: Bool = false
+    /// Blob change notifications buffered while a transaction is open.
+    ///
+    /// putBlob/deleteBlob append here instead of calling notifyBlobChange
+    /// directly when `inTransaction == true`. On COMMIT they are flushed to
+    /// observers; on ROLLBACK they are discarded. This ensures rolled-back blob
+    /// writes never reach incremental replication sessions (SECFIX-WS2-PK F3).
+    private var pendingBlobNotifications: [BlobChange] = []
     let observerRegistry: SQLiteObserverRegistry?
     /// Retained on openSchema so queryRows can resolve declared
     /// column types (bool, uuid, timestamp, bitmap, hlc, generated)
@@ -145,6 +152,14 @@ actor SQLiteBackend {
             Task { await r.notifyBlob(change) }
         }
     }
+
+    // MARK: - SQL identifier validation (SECFIX-WS2-PK F1)
+
+    // Identifier validation is provided by the module-level free function
+    // `validateSQLIdentifier` in SQLiteIdentifierValidator.swift. That single
+    // seam is shared by SQLiteStorage (row operations, table names, ORDER BY
+    // columns) and SQLitePredicateCompiler (predicate column names).
+    // No per-type copy of the rule exists (SECFIX-WS2-PK F7/F9/F10).
 
     func close() {
         connection.close()
@@ -335,10 +350,19 @@ actor SQLiteBackend {
             let result = try await block(txn)
             try connection.exec("COMMIT")
             inTransaction = false
+            // Flush blob notifications now that the transaction has committed to disk.
+            // These were buffered during the transaction so a ROLLBACK would discard
+            // them (SECFIX-WS2-PK F3): rolled-back blob writes must not reach
+            // replication sessions.
+            let pending = pendingBlobNotifications
+            pendingBlobNotifications.removeAll()
+            for change in pending { notifyBlobChange(change) }
             return result
         } catch {
             try? connection.exec("ROLLBACK")
             inTransaction = false
+            // Discard blob notifications for the rolled-back transaction.
+            pendingBlobNotifications.removeAll()
             throw error
         }
     }
@@ -360,21 +384,40 @@ actor SQLiteBackend {
     }
 
     /// Commit the transaction opened by `beginTransactionDirect`.
+    ///
+    /// Flushes any blob change notifications buffered during the transaction
+    /// to observers now that the writes are durably committed (SECFIX-WS2-PK F3).
     func commitTransactionDirect() throws {
         try connection.exec("COMMIT")
         inTransaction = false
+        let pending = pendingBlobNotifications
+        pendingBlobNotifications.removeAll()
+        for change in pending { notifyBlobChange(change) }
     }
 
     /// Roll back the transaction opened by `beginTransactionDirect`,
     /// discarding all changes since `BEGIN IMMEDIATE`.
+    ///
+    /// Discards buffered blob notifications — the rolled-back writes must not
+    /// reach replication sessions (SECFIX-WS2-PK F3).
     func rollbackTransactionDirect() throws {
         try? connection.exec("ROLLBACK")
         inTransaction = false
+        pendingBlobNotifications.removeAll()
     }
 
     // MARK: - Row operations
 
     func insertRow(table: String, values: [String: TypedValue]) throws -> RowHandle {
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
+        // the table name before it is interpolated into the INSERT statement, and
+        // validate all column names from the caller-supplied `values` map before
+        // they reach the INSERT column list. A name containing `"` or `;` can
+        // escape double-quote delimiters and alter the query. The shared module-level
+        // `validateSQLIdentifier` (SQLiteIdentifierValidator.swift) rejects any
+        // name outside `[A-Za-z_][A-Za-z0-9_]*` — one seam, no forked validator.
+        try validateSQLIdentifier(table)
+        for name in values.keys { try validateSQLIdentifier(name) }
         // At-rest encryption seam (mode 2/3): encrypt the content column
         // and stamp the key identifier before binding. No-op for mode 1.
         let values = try encryptedForWrite(values, config: encryptionConfig)
@@ -416,6 +459,14 @@ actor SQLiteBackend {
     // extend the encryption seam symmetrically with insertRow before this
     // guard would let such a write through.
     func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String]) throws -> RowHandle {
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
+        // the table name, all value-map column names, and the conflict-column list
+        // before interpolating into the INSERT … ON CONFLICT … DO UPDATE SQL.
+        // Mirrors the Rust backend guard and the Postgres backend guard — shared
+        // seam via module-level `validateSQLIdentifier`, no forked validator.
+        try validateSQLIdentifier(table)
+        for name in values.keys { try validateSQLIdentifier(name) }
+        for name in conflictColumns { try validateSQLIdentifier(name) }
         try assertContentKeyIDInvariant(values, table: table, config: encryptionConfig)
         let sortedKeys = values.keys.sorted()
         let cols = sortedKeys.map { "\"\($0)\"" }.joined(separator: ", ")
@@ -442,6 +493,13 @@ actor SQLiteBackend {
     }
 
     func updateRows(table: String, values: [String: TypedValue], where predicate: StoragePredicate) throws -> Int {
+        // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
+        // the table name and all column names from the caller-supplied `values`
+        // map before they reach the UPDATE SET clause. Mirrors the Rust backend
+        // guard and the Postgres backend guard — shared seam via module-level
+        // `validateSQLIdentifier`, no forked validator.
+        try validateSQLIdentifier(table)
+        for name in values.keys { try validateSQLIdentifier(name) }
         // Structural content/keyID invariant (FUP-D): updateRows does not run
         // the encryption seam, so a content update on an encrypting estate
         // would write plaintext with a null keyID. Guard it like the other
@@ -455,7 +513,7 @@ actor SQLiteBackend {
         let matchedKeys = try fetchMatchingRowKeys(table: table, predicate: predicate)
         let sortedKeys = values.keys.sorted()
         let setClause = sortedKeys.map { "\"\($0)\" = ?" }.joined(separator: ", ")
-        let compiled = SQLitePredicateCompiler.compile(predicate)
+        let compiled = try SQLitePredicateCompiler.compile(predicate)
         let sql = "UPDATE \"\(table)\" SET \(setClause) WHERE \(compiled.sql)"
         let stmt = try connection.prepare(sql)
         defer { stmt.finalize() }
@@ -475,11 +533,15 @@ actor SQLiteBackend {
     }
 
     func deleteRows(table: String, where predicate: StoragePredicate) throws -> Int {
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name before interpolation. Predicate column names are validated by
+        // SQLitePredicateCompiler.compile (SECFIX-WS2-PK F7).
+        try validateSQLIdentifier(table)
         // Pre-query row keys before deletion so notifications carry them.
         // The SQLiteBackend actor serializes all operations, so no interleaving
         // is possible between this SELECT and the DELETE.
         let matchedKeys = try fetchMatchingRowKeys(table: table, predicate: predicate)
-        let compiled = SQLitePredicateCompiler.compile(predicate)
+        let compiled = try SQLitePredicateCompiler.compile(predicate)
         let sql = "DELETE FROM \"\(table)\" WHERE \(compiled.sql)"
         let stmt = try connection.prepare(sql)
         defer { stmt.finalize() }
@@ -503,6 +565,10 @@ actor SQLiteBackend {
         tableSchema: TableDeclaration?,
         columns: [String]?
     ) throws -> [StorageRow] {
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name before it is interpolated into the SELECT statement. Mirrors the
+        // guard already applied in insertRow/upsertRow/updateRows/deleteRows.
+        try validateSQLIdentifier(table)
         // Resolve declared types from the retained schema so typed
         // columns decode to their proper TypedValue case. An explicit
         // tableSchema argument overrides the retained lookup.
@@ -511,10 +577,19 @@ actor SQLiteBackend {
         // Column projection (no-blob read): a non-nil `columns` list emits an
         // explicit SELECT of exactly those columns, so an unnamed column (e.g.
         // "content") is never read out of SQLite. A nil projection is the
-        // historical full `SELECT *`. Identifiers are quoted; an empty list
-        // degrades to `*` rather than producing invalid SQL.
+        // historical full `SELECT *`. Identifiers are validated and quoted; an
+        // empty list degrades to `*` rather than producing invalid SQL.
+        //
+        // Validation gate (SECFIX-WS2-PK F1): caller-supplied column names are
+        // embedded into the SQL SELECT list. Double-quoting is not sufficient
+        // protection if a name contains `"` — the quote can escape the
+        // double-quote delimiter and alter the query. Reject any name that is
+        // not a safe SQL identifier: [A-Za-z_][A-Za-z0-9_]*.
         let projection: String
         if let columns, !columns.isEmpty {
+            for name in columns {
+                try validateSQLIdentifier(name)
+            }
             projection = columns.map { "\"\($0)\"" }.joined(separator: ", ")
         } else {
             projection = "*"
@@ -522,12 +597,18 @@ actor SQLiteBackend {
         var sql = "SELECT \(projection) FROM \"\(table)\""
         var bindings: [TypedValue] = []
         if let predicate {
-            let compiled = SQLitePredicateCompiler.compile(predicate)
+            // compile is now `throws` — predicate column names are validated
+            // inside the compiler (SECFIX-WS2-PK F7).
+            let compiled = try SQLitePredicateCompiler.compile(predicate)
             sql += " WHERE \(compiled.sql)"
             bindings = compiled.bindings
         }
         if !orderBy.isEmpty {
-            let parts = orderBy.map { clause -> String in
+            // SQL-identifier injection guard (SECFIX-WS2-PK F7): validate every
+            // ORDER BY column name before it is interpolated into the SQL string.
+            // Mirrors the column-name guard applied in the predicate compiler.
+            let parts = try orderBy.map { clause -> String in
+                try validateSQLIdentifier(clause.column.name)
                 let dir = clause.direction == .ascending ? "ASC" : "DESC"
                 return "\"\(clause.column.name)\" \(dir)"
             }
@@ -580,9 +661,19 @@ actor SQLiteBackend {
         offset: Int?,
         columns: [String]?
     ) throws -> (rows: [StorageRow], skipped: Int) {
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name before it is interpolated. Mirrors queryRows and all write paths.
+        try validateSQLIdentifier(table)
         let resolvedSchema = schemaDeclaration?.tables.first(where: { $0.name == table })
+        // SQL-identifier injection guard (SECFIX-WS2-PK F10): validate the
+        // projected column names here, just as queryRows does for its projection
+        // path. queryRowsSkipCorrupt shares the same SELECT construction, so the
+        // same injection surface exists. Reject before SQL is built.
         let projection: String
         if let columns, !columns.isEmpty {
+            for name in columns {
+                try validateSQLIdentifier(name)
+            }
             projection = columns.map { "\"\($0)\"" }.joined(separator: ", ")
         } else {
             projection = "*"
@@ -590,12 +681,17 @@ actor SQLiteBackend {
         var sql = "SELECT \(projection) FROM \"\(table)\""
         var bindings: [TypedValue] = []
         if let predicate {
-            let compiled = SQLitePredicateCompiler.compile(predicate)
+            // compile is now `throws` — predicate column names are validated
+            // inside the compiler (SECFIX-WS2-PK F7).
+            let compiled = try SQLitePredicateCompiler.compile(predicate)
             sql += " WHERE \(compiled.sql)"
             bindings = compiled.bindings
         }
         if !orderBy.isEmpty {
-            let parts = orderBy.map { clause -> String in
+            // SQL-identifier injection guard (SECFIX-WS2-PK F7): validate ORDER
+            // BY column names before interpolation. Mirrors queryRows.
+            let parts = try orderBy.map { clause -> String in
+                try validateSQLIdentifier(clause.column.name)
                 let dir = clause.direction == .ascending ? "ASC" : "DESC"
                 return "\"\(clause.column.name)\" \(dir)"
             }
@@ -746,10 +842,15 @@ actor SQLiteBackend {
     }
 
     func countRows(table: String, where predicate: StoragePredicate?) throws -> Int {
+        // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
+        // name before it is interpolated into the COUNT query.
+        try validateSQLIdentifier(table)
         var sql = "SELECT COUNT(*) FROM \"\(table)\""
         var bindings: [TypedValue] = []
         if let predicate {
-            let compiled = SQLitePredicateCompiler.compile(predicate)
+            // compile is now `throws` — predicate column names are validated
+            // inside the compiler (SECFIX-WS2-PK F7).
+            let compiled = try SQLitePredicateCompiler.compile(predicate)
             sql += " WHERE \(compiled.sql)"
             bindings = compiled.bindings
         }
@@ -782,7 +883,9 @@ actor SQLiteBackend {
         let pkCol = schemaDeclaration?
             .tables.first(where: { $0.name == table })?
             .primaryKey.first ?? "row_id"
-        let compiled = SQLitePredicateCompiler.compile(predicate)
+        // compile is now `throws` — predicate column names are validated inside
+        // the compiler (SECFIX-WS2-PK F7).
+        let compiled = try SQLitePredicateCompiler.compile(predicate)
         let sql = "SELECT \"\(pkCol)\" FROM \"\(table)\" WHERE \(compiled.sql)"
         let stmt = try connection.prepare(sql)
         defer { stmt.finalize() }
@@ -912,10 +1015,16 @@ actor SQLiteBackend {
         try stmt.bind(.text(key), at: 1)
         try stmt.bind(.blob(bytes), at: 2)
         _ = try stmt.step()
-        // Notify blob subscribers after a successful write. The bytes are
-        // carried in the notification so the incremental replication session
-        // can propagate the value without a second round-trip to the source.
-        notifyBlobChange(BlobChange(key: key, event: .put, bytes: bytes))
+        // Buffer the notification when inside a transaction (SECFIX-WS2-PK F3).
+        // The SQLite row is written but not yet committed; emitting now would let
+        // replication sessions see a row that may be rolled back. The notification
+        // is flushed on COMMIT or discarded on ROLLBACK.
+        let change = BlobChange(key: key, event: .put, bytes: bytes)
+        if inTransaction {
+            pendingBlobNotifications.append(change)
+        } else {
+            notifyBlobChange(change)
+        }
     }
 
     func getBlob(_ key: BlobKey) throws -> Data? {
@@ -931,10 +1040,14 @@ actor SQLiteBackend {
         defer { stmt.finalize() }
         try stmt.bind(.text(key), at: 1)
         _ = try stmt.step()
-        // Notify blob subscribers after a successful delete. bytes is nil for
-        // delete events — the incremental session only needs the key to issue
-        // a delete on the destination.
-        notifyBlobChange(BlobChange(key: key, event: .delete, bytes: nil))
+        // Buffer the notification when inside a transaction (SECFIX-WS2-PK F3).
+        // Mirrors the put path: flush on COMMIT, discard on ROLLBACK.
+        let change = BlobChange(key: key, event: .delete, bytes: nil)
+        if inTransaction {
+            pendingBlobNotifications.append(change)
+        } else {
+            notifyBlobChange(change)
+        }
     }
 
     func blobExists(_ key: BlobKey) throws -> Bool {
@@ -973,12 +1086,14 @@ actor SQLiteBackend {
                "before_adj", "before_op", "before_pv",
                "after_adj", "after_op", "after_pv",
                "before_udc", "before_qid", "after_udc", "after_qid",
-               "actor", "reason")
+               "actor", "reason",
+               "physical_time", "logical_count", "node_id")
             VALUES (?, ?, ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?, ?,
-                    ?, ?)
+                    ?, ?,
+                    ?, ?, ?)
             ON CONFLICT("event_id", "hlc") DO NOTHING
             """)
         defer { stmt.finalize() }
@@ -1015,6 +1130,15 @@ actor SQLiteBackend {
         } else {
             try stmt.bind(.null, at: 17)
         }
+        // Full-precision HLC columns. The packed `hlc` column (bound at 2) stays
+        // the ordering key and PK component, but it truncates physicalTime to 40
+        // bits (HLC.packed masks & 0xFF_FFFF_FFFF) — lossy for any post-2004 ms.
+        // These three columns store the HLC losslessly, mirroring the Rust port,
+        // so decodeAuditRow reconstructs the exact HLC instead of the truncated
+        // packed form (which silently dropped bit 40 on incremental hydration).
+        try stmt.bind(.int(event.hlc.physicalTime), at: 18)
+        try stmt.bind(.int(Int64(event.hlc.logicalCount)), at: 19)
+        try stmt.bind(.int(Int64(event.hlc.nodeID)), at: 20)
         _ = try stmt.step()
     }
 
@@ -1091,9 +1215,18 @@ actor SQLiteBackend {
         guard let eventID = UUID(uuidString: eventIDStr) else {
             throw StorageError.corruptStoredValue(table: table, column: "event_id", storedText: eventIDStr)
         }
-        // HLC is stored as Int64(bitPattern: hlc.packed); recover via HLC(packed:)
-        // for a bit-identical round-trip.
-        let hlc = HLC(packed: UInt64(bitPattern: stmt.columnInt64(1)))
+        // Reconstruct the HLC from the full-precision columns (physical_time,
+        // logical_count, node_id at indices 17/18/19), NOT the packed `hlc`
+        // column at index 1: HLC.packed truncates physicalTime to 40 bits, which
+        // silently drops bit 40 for any post-2004 ms and makes a cold-rebuild
+        // lastHLC disagree with the snapshot path (skipping newer tail events on
+        // incremental hydration). The packed column remains the ordering key.
+        // Mirrors the Rust port, which also stores the three columns full.
+        let hlc = HLC(
+            physicalTime: stmt.columnInt64(17),
+            logicalCount: Int32(truncatingIfNeeded: stmt.columnInt64(18)),
+            nodeID: Int32(truncatingIfNeeded: stmt.columnInt64(19))
+        )
 
         let estateUUIDStr = stmt.columnText(2) ?? ""
         guard let estateUUID = UUID(uuidString: estateUUIDStr) else {

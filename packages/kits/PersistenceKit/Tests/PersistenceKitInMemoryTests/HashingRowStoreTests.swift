@@ -2,10 +2,13 @@
 //
 // Tests for the hash-on-write decorator (NT-P2).
 // Verifies:
-//   Part 1: writes to hashable tables compute and emit dirty-chain events;
-//           writes to non-hashable tables do not fire the hook.
-//   Part 2: DirtyChainEvent can be constructed, dispatched, and received
-//           by an observer.
+//   (a) insert to hashable table emits dirty-chain event
+//   (b) upsert to hashable table emits dirty-chain event
+//   (c) insert to non-hashable table does not fire the hook
+//   (e) read operations pass through unchanged
+//   (f) hashable field defaults to false
+//   (g) default observeDirtyChain returns a finished AsyncStream
+//   (h) DirtyChainEvent can be constructed, dispatched, and received by an observer
 
 import Testing
 import Foundation
