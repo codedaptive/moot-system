@@ -36,6 +36,14 @@ jobs:
           # No write-scoped git credential is left in the local git config
           # while attacker-reachable Cargo build code runs below.
           persist-credentials: false
+          # Full history so origin/main exists for the ancestry gate below.
+          fetch-depth: 0
+
+      # The publisher pushes branch + tag in one command, so a legitimate
+      # release tag always points at a commit reachable from main. A v* tag
+      # pushed on an unreviewed side commit fails here before anything builds.
+      - name: Check tag commit is on main
+        run: git merge-base --is-ancestor HEAD origin/main
 
       - name: Check generated provenance
         run: |
