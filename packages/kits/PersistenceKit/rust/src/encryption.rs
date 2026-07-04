@@ -325,12 +325,18 @@ fn create_key_file_atomic(path: &Path, data: &[u8]) -> StorageResult<()> {
 /// - The key was found and applied successfully via `PRAGMA key`.
 ///
 /// Returns `Err(rusqlite::Error)` if the `PRAGMA key` statement itself fails
-/// (e.g. SQLCipher I/O error).
+/// (e.g. SQLCipher I/O error), OR if a present `db.key` is the wrong length.
 ///
-/// An out-of-spec key file (wrong byte length) is treated as absent: the
-/// connection proceeds without a key, and the database will fail naturally
-/// on its first real SQL statement with `SqliteFailure(NotADatabase)` — the
-/// same observable outcome as a missing key.
+/// A present but out-of-spec key file (wrong byte length) FAILS CLOSED with
+/// `Err` — byte-for-byte the same rejection `resolve_install_encryption` makes
+/// for the estate's own connection. The sibling `db.key` means the estate is
+/// meant to be encrypted; a malformed key must never silently drop a
+/// private/sidecar store (BM25 index, import shard) to plaintext. A FRESH
+/// sidecar file has no ciphertext to trip `NotADatabase`, so returning `Ok`
+/// here would write user content unencrypted at rest — the fail-open gap this
+/// guards. A genuinely-absent (or unreadable) key file returns `Ok(())`: the
+/// estate is unencrypted (the legitimate pre-lockdown / test path), matching
+/// `resolve_install_encryption`'s `Err(_) => Ok(None)`.
 ///
 /// Called by `InvertedIndexStore::open_for_storage`, which opens a PRIVATE
 /// rusqlite `Connection` alongside the shared `SqliteStorage` connection. WAL
@@ -359,11 +365,72 @@ pub fn apply_install_encryption_to_conn(
             // cipher key (no passphrase KDF). This must be the FIRST statement.
             conn.execute_batch(&format!("PRAGMA key = \"x'{key_hex}'\";"))
         }
-        // No key file or wrong-length key: proceed without encryption. A
-        // wrong-length key is a configuration bug (bad installer output); the
-        // database open will fail on the first real SQL with NotADatabase, which
-        // surfaces the misconfiguration without hiding it.
-        _ => Ok(()),
+        // Present but WRONG LENGTH: fail closed, the same rejection
+        // `resolve_install_encryption` makes for the estate's own connection. A
+        // fresh private/sidecar file has no ciphertext to trip NotADatabase, so
+        // returning Ok would silently write user content unencrypted at rest.
+        // secfix/ce-keyhelper-fail-closed.
+        Ok(bytes) => Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+            Some(format!(
+                "install key at {key_path:?} is {} bytes, expected {INSTALL_KEY_LEN} \
+                 — refusing to open a private store unencrypted",
+                bytes.len()
+            )),
+        )),
+        // No key file (or unreadable): the estate is unencrypted — the same
+        // outcome `resolve_install_encryption` produces (`Err(_) => Ok(None)`).
+        // A genuinely-absent key is the legitimate pre-lockdown / test path.
+        Err(_) => Ok(()),
+    }
+}
+
+/// ATTACH a shard database to `conn`, applying the install key INSIDE the kit
+/// (ingest best-practices EXT-4: shard-merge key application never leaks to app
+/// code). When a sibling `db.key` exists beside `shard_path`, the shard is
+/// attached `KEY "x'<hex>'"` (raw-key SQLCipher semantics — the same key the
+/// estate and every sibling file use); without one, a plain unencrypted ATTACH.
+/// The shard path is BOUND (never interpolated); the alias and key-hex are
+/// validated to safe character sets before interpolation, so no injection
+/// surface exists. ATTACH cannot run inside a transaction — callers attach
+/// first, then open their merge transaction, then DETACH after commit.
+pub fn attach_with_install_key(
+    conn: &rusqlite::Connection,
+    shard_path: &str,
+    alias: &str,
+) -> Result<(), rusqlite::Error> {
+    // Alias whitelist: SQL identifier charset only (it is interpolated).
+    if alias.is_empty()
+        || !alias.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false)
+        || !alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "attach alias must be a bare SQL identifier, got {alias:?}"
+        )));
+    }
+    let parent = Path::new(shard_path).parent().map(|p| p.to_path_buf());
+    let key_hex: Option<String> = parent
+        .map(|p| p.join(INSTALL_KEY_FILE))
+        .and_then(|kp| std::fs::read(kp).ok())
+        .filter(|bytes| bytes.len() == INSTALL_KEY_LEN)
+        .map(|bytes| bytes.iter().map(|b| format!("{b:02x}")).collect());
+    match key_hex {
+        Some(hex) => {
+            // hex is produced from raw bytes above — [0-9a-f] only, safe to
+            // interpolate as the raw-key literal (a BOUND key parameter would
+            // take SQLCipher's passphrase-KDF path, deriving a DIFFERENT key).
+            conn.execute(
+                &format!("ATTACH DATABASE ?1 AS {alias} KEY \"x'{hex}'\""),
+                rusqlite::params![shard_path],
+            )
+            .map(|_| ())
+        }
+        None => conn
+            .execute(
+                &format!("ATTACH DATABASE ?1 AS {alias} KEY ''"),
+                rusqlite::params![shard_path],
+            )
+            .map(|_| ()),
     }
 }
 
@@ -583,5 +650,47 @@ impl RowCrypto {
         provider: &dyn AeadProvider,
     ) -> Result<Vec<u8>, String> {
         provider.decrypt(ciphertext, key)
+    }
+}
+
+#[cfg(test)]
+mod install_key_helper_tests {
+    use super::*;
+
+    // secfix/ce-keyhelper-fail-closed: a present but wrong-length db.key must
+    // FAIL CLOSED (Err), matching resolve_install_encryption — never proceed to
+    // create a private/sidecar store in plaintext.
+    #[test]
+    fn apply_install_encryption_fails_closed_on_wrong_length_key() {
+        let dir = std::env::temp_dir()
+            .join(format!("pk_keyhelper_wrong_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let db_path = dir.join("estate.sqlite");
+        // 6 bytes, not INSTALL_KEY_LEN (32) — malformed installer output.
+        std::fs::write(dir.join(INSTALL_KEY_FILE), b"123456").expect("write key");
+        // The wrong-length arm returns before touching the connection; an
+        // in-memory conn is a valid stand-in.
+        let conn = rusqlite::Connection::open_in_memory().expect("open conn");
+        let res = apply_install_encryption_to_conn(&conn, db_path.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            res.is_err(),
+            "present-but-wrong-length db.key must fail closed, not silently \
+             open a private store unencrypted"
+        );
+    }
+
+    // An absent key file is the legitimate unencrypted-estate path → Ok(()),
+    // matching resolve_install_encryption's Err(_) => Ok(None).
+    #[test]
+    fn apply_install_encryption_ok_when_no_key_file() {
+        let dir = std::env::temp_dir()
+            .join(format!("pk_keyhelper_absent_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let db_path = dir.join("estate.sqlite");
+        let conn = rusqlite::Connection::open_in_memory().expect("open conn");
+        let res = apply_install_encryption_to_conn(&conn, db_path.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(res.is_ok(), "absent db.key is a legitimate unencrypted estate");
     }
 }

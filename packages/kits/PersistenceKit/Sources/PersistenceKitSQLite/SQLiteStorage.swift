@@ -335,8 +335,26 @@ actor SQLiteBackend {
         isolation: IsolationLevel,
         _ block: (any StorageTransaction) async throws -> T
     ) async throws -> T {
-        if inTransaction {
-            throw StorageError.transactionConflict(detail: "nested transactions not supported")
+        // Concurrent transactions WAIT for the open one to finish rather than
+        // failing. The actor suspends inside `block` (it is async), so a second
+        // caller can interleave at that suspension and land here with
+        // `inTransaction == true` — that is ordinary contention between
+        // background workers (reindex's Merkle rollup vs. a dream cycle vs. a
+        // live capture), not a programming error, and throwing surfaced as
+        // "reindex: background backfill failed: transactionConflict" on a busy
+        // daemon. The wait is bounded so a TRUE nested transaction (a block
+        // reentering runTransaction on its own backend, which would deadlock)
+        // still fails loudly instead of hanging. beginTransactionDirect keeps
+        // its immediate throw: it is synchronous and cannot await.
+        var waitedNanos: UInt64 = 0
+        let waitLimitNanos: UInt64 = 60_000_000_000  // 60 s
+        while inTransaction {
+            if waitedNanos >= waitLimitNanos {
+                throw StorageError.transactionConflict(
+                    detail: "transaction still open after 60 s wait — nested transactions not supported")
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)  // 25 ms, then re-check
+            waitedNanos += 25_000_000
         }
         let begin: String
         switch isolation {
@@ -430,7 +448,11 @@ actor SQLiteBackend {
         let cols = sortedKeys.map { "\"\($0)\"" }.joined(separator: ", ")
         let placeholders = Array(repeating: "?", count: sortedKeys.count).joined(separator: ", ")
         let sql = "INSERT INTO \"\(table)\" (\(cols)) VALUES (\(placeholders))"
-        let stmt = try connection.prepare(sql)
+        // prepareCached: SQL for a given (table, shape) is identical across a
+        // bulk loop — parse once, replay from the connection's statement cache
+        // (best-practices §5; the per-row re-parse was a measured 50k-import
+        // hot spot). finalize() on a cached statement resets it for reuse.
+        let stmt = try connection.prepareCached(sql)
         defer { stmt.finalize() }
         for (i, key) in sortedKeys.enumerated() {
             try stmt.bind(values[key]!, at: Int32(i + 1))
@@ -481,7 +503,11 @@ actor SQLiteBackend {
             sql += " ON CONFLICT(\(conflictCols))"
             sql += updateCols.isEmpty ? " DO NOTHING" : " DO UPDATE SET \(updateCols)"
         }
-        let stmt = try connection.prepare(sql)
+        // prepareCached: SQL for a given (table, shape) is identical across a
+        // bulk loop — parse once, replay from the connection's statement cache
+        // (best-practices §5; the per-row re-parse was a measured 50k-import
+        // hot spot). finalize() on a cached statement resets it for reuse.
+        let stmt = try connection.prepareCached(sql)
         defer { stmt.finalize() }
         for (i, key) in sortedKeys.enumerated() {
             try stmt.bind(values[key]!, at: Int32(i + 1))
@@ -515,7 +541,11 @@ actor SQLiteBackend {
         let setClause = sortedKeys.map { "\"\($0)\" = ?" }.joined(separator: ", ")
         let compiled = try SQLitePredicateCompiler.compile(predicate)
         let sql = "UPDATE \"\(table)\" SET \(setClause) WHERE \(compiled.sql)"
-        let stmt = try connection.prepare(sql)
+        // prepareCached: SQL for a given (table, shape) is identical across a
+        // bulk loop — parse once, replay from the connection's statement cache
+        // (best-practices §5; the per-row re-parse was a measured 50k-import
+        // hot spot). finalize() on a cached statement resets it for reuse.
+        let stmt = try connection.prepareCached(sql)
         defer { stmt.finalize() }
         var idx: Int32 = 1
         for key in sortedKeys {
@@ -543,7 +573,11 @@ actor SQLiteBackend {
         let matchedKeys = try fetchMatchingRowKeys(table: table, predicate: predicate)
         let compiled = try SQLitePredicateCompiler.compile(predicate)
         let sql = "DELETE FROM \"\(table)\" WHERE \(compiled.sql)"
-        let stmt = try connection.prepare(sql)
+        // prepareCached: SQL for a given (table, shape) is identical across a
+        // bulk loop — parse once, replay from the connection's statement cache
+        // (best-practices §5; the per-row re-parse was a measured 50k-import
+        // hot spot). finalize() on a cached statement resets it for reuse.
+        let stmt = try connection.prepareCached(sql)
         defer { stmt.finalize() }
         for (i, v) in compiled.bindings.enumerated() {
             try stmt.bind(v, at: Int32(i + 1))
@@ -617,7 +651,11 @@ actor SQLiteBackend {
         if let limit { sql += " LIMIT \(limit)" }
         if let offset, offset > 0 { sql += " OFFSET \(offset)" }
 
-        let stmt = try connection.prepare(sql)
+        // prepareCached: SQL for a given (table, shape) is identical across a
+        // bulk loop — parse once, replay from the connection's statement cache
+        // (best-practices §5; the per-row re-parse was a measured 50k-import
+        // hot spot). finalize() on a cached statement resets it for reuse.
+        let stmt = try connection.prepareCached(sql)
         defer { stmt.finalize() }
         for (i, v) in bindings.enumerated() {
             try stmt.bind(v, at: Int32(i + 1))
@@ -700,7 +738,11 @@ actor SQLiteBackend {
         if let limit { sql += " LIMIT \(limit)" }
         if let offset, offset > 0 { sql += " OFFSET \(offset)" }
 
-        let stmt = try connection.prepare(sql)
+        // prepareCached: SQL for a given (table, shape) is identical across a
+        // bulk loop — parse once, replay from the connection's statement cache
+        // (best-practices §5; the per-row re-parse was a measured 50k-import
+        // hot spot). finalize() on a cached statement resets it for reuse.
+        let stmt = try connection.prepareCached(sql)
         defer { stmt.finalize() }
         for (i, v) in bindings.enumerated() {
             try stmt.bind(v, at: Int32(i + 1))
@@ -854,7 +896,11 @@ actor SQLiteBackend {
             sql += " WHERE \(compiled.sql)"
             bindings = compiled.bindings
         }
-        let stmt = try connection.prepare(sql)
+        // prepareCached: SQL for a given (table, shape) is identical across a
+        // bulk loop — parse once, replay from the connection's statement cache
+        // (best-practices §5; the per-row re-parse was a measured 50k-import
+        // hot spot). finalize() on a cached statement resets it for reuse.
+        let stmt = try connection.prepareCached(sql)
         defer { stmt.finalize() }
         for (i, v) in bindings.enumerated() {
             try stmt.bind(v, at: Int32(i + 1))
@@ -887,7 +933,11 @@ actor SQLiteBackend {
         // the compiler (SECFIX-WS2-PK F7).
         let compiled = try SQLitePredicateCompiler.compile(predicate)
         let sql = "SELECT \"\(pkCol)\" FROM \"\(table)\" WHERE \(compiled.sql)"
-        let stmt = try connection.prepare(sql)
+        // prepareCached: SQL for a given (table, shape) is identical across a
+        // bulk loop — parse once, replay from the connection's statement cache
+        // (best-practices §5; the per-row re-parse was a measured 50k-import
+        // hot spot). finalize() on a cached statement resets it for reuse.
+        let stmt = try connection.prepareCached(sql)
         defer { stmt.finalize() }
         for (i, v) in compiled.bindings.enumerated() {
             try stmt.bind(v, at: Int32(i + 1))
@@ -1165,7 +1215,11 @@ actor SQLiteBackend {
         }
         sql += " ORDER BY \"hlc\" ASC LIMIT \(limit)"
 
-        let stmt = try connection.prepare(sql)
+        // prepareCached: SQL for a given (table, shape) is identical across a
+        // bulk loop — parse once, replay from the connection's statement cache
+        // (best-practices §5; the per-row re-parse was a measured 50k-import
+        // hot spot). finalize() on a cached statement resets it for reuse.
+        let stmt = try connection.prepareCached(sql)
         defer { stmt.finalize() }
         for (i, v) in bindings.enumerated() {
             try stmt.bind(v, at: Int32(i + 1))

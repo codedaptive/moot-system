@@ -2,7 +2,7 @@
 # Publish Report
 
 Venue: `moot-system`
-Source commit: `aa4eee3f5c75357f2db7769f1a1a50dcfa808ea1`
+Source commit: `cc4e5ad00098d950deba594d75d77eec299dd797`
 
 ## Loaded Packages
 
@@ -55,6 +55,7 @@ Removed internal/process comment lines:
 - `packages/kits/PersistenceKit/Sources/PersistenceKitReplication/StorageReplicator.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKitSQLite/SQLiteConnection.swift`: 3 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKitSQLite/SQLiteObserver.swift`: 2 line(s)
+- `packages/kits/PersistenceKit/Sources/PersistenceKitSQLite/SQLiteShard.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKitSQLite/SQLiteStorage.swift`: 3 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKitSQLite/SQLiteStores.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitConformance/ConformanceRunner.swift`: 1 line(s)
@@ -70,6 +71,7 @@ Removed internal/process comment lines:
 - `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/SecurityHardeningTests.swift`: 2 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/SnapshotRegistryTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitPostgreSQLTests/PostgreSQLBasicTests.swift`: 1 line(s)
+- `packages/kits/PersistenceKit/Tests/PersistenceKitPostgreSQLTests/PostgreSQLSecurityTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitReplicationTests/IncrementalReplicationTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitReplicationTests/ReplicationConformanceTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitReplicationTests/SnapshotReplicationTests.swift`: 1 line(s)
@@ -156,6 +158,6 @@ Rewritten cross-venue Cargo dependencies:
 Mechanical publish: source export, comment scrubbing, provenance generation,
 cross-venue Cargo dependency rewriting, root SwiftPM manifest generation, root
 Cargo workspace generation, changelog entry, commit, lockstep `v` tag, and
-push. Cross-venue dependencies reference `main`; version-pinned cross-venue
-dependencies, precompiled binary artifacts, generated API reference docs, and
-full conformance-test certification are later publisher phases.
+push. Cross-venue dependencies are pinned to the lockstep `v` tag;
+precompiled binary artifacts, generated API reference docs, and full
+conformance-test certification are later publisher phases.
