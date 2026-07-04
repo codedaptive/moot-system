@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+doc: topology
+package: QueueKit
+repo: moot-system
+authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
+authored_date: 2026-07-04
+sources:
+  - path: Sources/QueueKit/QueueKit.swift
+    blob: 60dfaa1e8f92ec051810b50d8b9cadc47388c02f
+  - path: Sources/QueueKit/QueueBackend.swift
+    blob: eb67e0b821bc9bfdec8cfde621c5e70d4295d331
+  - path: Sources/QueueKit/FilesystemBackend.swift
+    blob: c0e5f536e20b1def11875e57b587e8392b6f936d
+  - path: Sources/QueueKit/PersistenceKitBackend.swift
+    blob: 96175a8b27c8b6e929f417d95b141f727c5179d7
+  - path: Sources/QueueKit/DrainLease.swift
+    blob: 3f1df6aa1fab44c993bd49d96de179ff03450303
+  - path: Sources/QueueKit/Watcher.swift
+    blob: cf2b270b9c60da34f7a25c016f8c18b6ba6149e4
+  - path: Sources/QueueKit/QueueKitTelemetry.swift
+    blob: 29024f112bf133012283205175aa336b8d80d7c9
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="600" viewBox="0 0 940 600" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#333"/>
+    </marker>
+  </defs>
+
+  <style>
+    .box   { fill: #ffffff; stroke: #333; stroke-width: 1.5; }
+    .art   { fill: #f4f4f4; stroke: #777; stroke-width: 1.2; }
+    .label { font-size: 13px; fill: #111; }
+    .sub   { font-size: 10.5px; fill: #555; }
+    .flow  { stroke: #333; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+    .back  { stroke: #333; stroke-width: 1.5; fill: none; marker-end: url(#arrow); stroke-dasharray: 2 2; }
+    .loop  { stroke: #888; stroke-width: 1.3; fill: none; marker-end: url(#arrow); stroke-dasharray: 5 3; }
+    .region { fill: none; stroke: #999; stroke-width: 1.2; stroke-dasharray: 7 4; }
+    .regionlabel { font-size: 11px; fill: #777; font-style: italic; }
+  </style>
+
+  <!-- Title -->
+  <text x="20" y="28" font-size="15" font-weight="bold" fill="#111">QueueKit: a job crosses a process boundary</text>
+
+  <!-- Main pipeline row -->
+  <rect class="box" x="20" y="70" width="110" height="56" rx="6"/>
+  <text class="label" x="75" y="94" text-anchor="middle">Producer</text>
+  <text class="sub" x="75" y="110" text-anchor="middle">send / send(batch:)</text>
+
+  <rect class="box" x="170" y="70" width="140" height="56" rx="6"/>
+  <text class="label" x="240" y="92" text-anchor="middle">QueueKit facade</text>
+  <text class="sub" x="240" y="108" text-anchor="middle">drain · watch · reply</text>
+  <text class="sub" x="240" y="121" text-anchor="middle">awaitDrain</text>
+
+  <rect class="box" x="360" y="40" width="160" height="52" rx="6"/>
+  <text class="label" x="440" y="62" text-anchor="middle">FilesystemBackend</text>
+  <text class="sub" x="440" y="78" text-anchor="middle">POSIX maildir, no DB</text>
+
+  <rect class="box" x="360" y="112" width="160" height="52" rx="6"/>
+  <text class="label" x="440" y="134" text-anchor="middle">PersistenceKitBackend</text>
+  <text class="sub" x="440" y="150" text-anchor="middle">shared SQLite table</text>
+
+  <rect class="box" x="600" y="70" width="140" height="56" rx="6"/>
+  <text class="label" x="670" y="94" text-anchor="middle">Consumer</text>
+  <text class="sub" x="670" y="110" text-anchor="middle">drain worker / watch handler</text>
+
+  <!-- Pipeline arrows -->
+  <line class="flow" x1="130" y1="98" x2="168" y2="98"/>
+  <line class="flow" x1="310" y1="88" x2="358" y2="66"/>
+  <line class="flow" x1="310" y1="108" x2="358" y2="138"/>
+  <line class="flow" x1="520" y1="66" x2="598" y2="90"/>
+  <line class="flow" x1="520" y1="138" x2="598" y2="106"/>
+
+  <!-- reply return arc (Consumer -> facade) -->
+  <path class="back" d="M 670 128 C 670 190, 400 195, 240 128"/>
+  <text class="sub" x="440" y="200" text-anchor="middle">reply(to:status:) / reply(session:) / reply(batch:)</text>
+
+  <!-- Support infrastructure row -->
+  <rect class="box" x="20" y="240" width="150" height="52" rx="6"/>
+  <text class="label" x="95" y="262" text-anchor="middle">Watcher</text>
+  <text class="sub" x="95" y="278" text-anchor="middle">kqueue · inotify · poll</text>
+
+  <rect class="box" x="230" y="240" width="160" height="52" rx="6"/>
+  <text class="label" x="310" y="262" text-anchor="middle">DrainLease</text>
+  <text class="sub" x="310" y="278" text-anchor="middle">per-stream heartbeat TTL</text>
+
+  <rect class="box" x="450" y="240" width="160" height="52" rx="6"/>
+  <text class="label" x="530" y="262" text-anchor="middle">QueueKitTelemetry</text>
+  <text class="sub" x="530" y="278" text-anchor="middle">queue.* metrics</text>
+
+  <!-- Watcher wakes FilesystemBackend -->
+  <path class="loop" d="M 95 238 C 95 180, 250 130, 358 78"/>
+  <text class="sub" x="150" y="180" text-anchor="middle">wake (spurious OK)</text>
+
+  <!-- DrainLease gates reclaimInFlight on both backends -->
+  <path class="loop" d="M 310 238 C 310 190, 350 150, 358 138"/>
+  <path class="loop" d="M 340 240 C 380 200, 400 130, 420 92"/>
+  <text class="sub" x="330" y="220" text-anchor="middle">gates reclaimInFlight</text>
+
+  <!-- Telemetry fed from facade after drain() -->
+  <path class="loop" d="M 530 238 C 530 190, 400 140, 260 128"/>
+  <text class="sub" x="600" y="210" text-anchor="middle">reportQueueStats after drain()</text>
+
+  <!-- External / on-disk regions -->
+  <rect class="region" x="360" y="330" width="220" height="90"/>
+  <text class="regionlabel" x="370" y="348">FilesystemBackend's own on-disk state</text>
+  <rect class="art" x="380" y="360" width="180" height="42" rx="6"/>
+  <text class="label" x="470" y="378" text-anchor="middle">Maildir</text>
+  <text class="sub" x="470" y="393" text-anchor="middle">tmp/ → new/ → cur/ → done/</text>
+
+  <rect class="region" x="620" y="330" width="260" height="90"/>
+  <text class="regionlabel" x="630" y="348">External kit boundary — PersistenceKit</text>
+  <rect class="art" x="650" y="360" width="200" height="42" rx="6"/>
+  <text class="label" x="750" y="378" text-anchor="middle">queue.sqlite</text>
+  <text class="sub" x="750" y="393" text-anchor="middle">queuekit_jobs table</text>
+
+  <rect class="region" x="360" y="440" width="260" height="90"/>
+  <text class="regionlabel" x="370" y="458">External kit boundary — IntellectusLib</text>
+  <rect class="art" x="400" y="470" width="180" height="42" rx="6"/>
+  <text class="label" x="490" y="488" text-anchor="middle">Telemetry sink</text>
+  <text class="sub" x="490" y="503" text-anchor="middle">off by default, ~1 ns gate</text>
+
+  <!-- Feed arrows from backends into their on-disk / external state -->
+  <line class="flow" x1="440" y1="164" x2="470" y2="358" opacity="0.55"/>
+  <line class="flow" x1="470" y1="164" x2="750" y2="358" opacity="0.55"/>
+  <line class="flow" x1="530" y1="292" x2="490" y2="468" opacity="0.55"/>
+</svg>
