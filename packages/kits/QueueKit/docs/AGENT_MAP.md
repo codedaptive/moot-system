@@ -20,9 +20,9 @@ sources:
   - path: Sources/QueueKit/QueueError.swift
     blob: 2697c4b7404b9e04259267cd8f4008030ebb6754
   - path: Sources/QueueKit/QueueKit.swift
-    blob: 60dfaa1e8f92ec051810b50d8b9cadc47388c02f
+    blob: 3878243f6da8ad1b55bba5271f7502e8d6b8e3d7
   - path: Sources/QueueKit/QueueKitTelemetry.swift
-    blob: 29024f112bf133012283205175aa336b8d80d7c9
+    blob: 0e656863d2c9f8e83dc13fc8b6b94ae2f25ecf06
   - path: Sources/QueueKit/Watcher.swift
     blob: cf2b270b9c60da34f7a25c016f8c18b6ba6149e4
 ---
@@ -34,36 +34,36 @@ PURPOSE: general-purpose durable work queue. Producer→`send`/`writeBatch`→ba
 DEPS: imports SubstrateTypes (HLC/HLCGenerator: hybrid logical clock), PersistenceKit (Storage, rowStore, transaction, observer: PersistenceKitBackend only), IntellectusLib (self-report telemetry, DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28). ConvergenceKit is application-layer composition and deliberately NOT a dependency (spec §11). Imported by: none within this repo checkout; source comments name CorpusKit and GeniusLocusKit as external mount-time consumers (not present in moot-system). Rust port in rust/ (8 files, ~3k lines) mirrors facade + both backends, PersistenceKitBackend behind `persistencekit` cargo feature. Python port in python/queuekit/ mirrors FilesystemBackend only (spec §2: Python has no PersistenceKit backend). All three gated by shared conformance fixtures in Tests/QueueKitTests/Fixtures/*.json.
 
 ENTRY POINTS (most callers need only these):
-- QueueKit.swift:52 `QueueKit.init(root:hlcGenerator:) throws`: mount FilesystemBackend at root, create maildir, clean stale tmp/
-- QueueKit.swift:65 `QueueKit.init(backend:root:)`: mount explicit backend (PersistenceKitBackend, or a test double)
-- QueueKit.swift:72 `send(_ job: Job) async throws`: enqueue one job
-- QueueKit.swift:85 `drain() async throws -> [(job: Job, sessionID: SessionID)]`: claim all available jobs
-- QueueKit.swift:129 `reply(to:status:artifacts:) async throws`: mark one claimed job terminal
-- QueueKit.swift:123 `watch(handler:) async throws`: subscribe a per-job handler
+- QueueKit.swift:53 `QueueKit.init(root:hlcGenerator:) throws`: mount FilesystemBackend at root, create maildir, clean stale tmp/
+- QueueKit.swift:66 `QueueKit.init(backend:root:)`: mount explicit backend (PersistenceKitBackend, or a test double)
+- QueueKit.swift:73 `send(_ job: Job) async throws`: enqueue one job
+- QueueKit.swift:86 `drain() async throws -> [(job: Job, sessionID: SessionID)]`: claim all available jobs
+- QueueKit.swift:130 `reply(to:status:artifacts:) async throws`: mark one claimed job terminal
+- QueueKit.swift:124 `watch(handler:) async throws`: subscribe a per-job handler
 
 ## Symbol Table
 
 ### Facade: QueueKit.swift
 - :28 `staleTmpThreshold = 5 * 60`: tmp/ files older than this on init are deleted (crash between write and rename; never visible in new/, safe to remove)
 - :30 `final class QueueKit: Sendable`
-- :39 `latencyWindow`: nonisolated(unsafe); caller (GLK scheduler actor / serial test) owns exclusivity
-- :47 `estateTag: String = "unknown"`: nonisolated(unsafe); set ONCE at mount before any drain(), never again
-- :52 `init(root:hlcGenerator:) throws`: see ENTRY POINTS
-- :65 `init(backend:root:)`: see ENTRY POINTS
-- :72 `send(_:)` / :81 `send(batch:) -> Int`: writeBatch twin; FS backend fsyncs new/ ONCE for the batch
-- :85 `drain()` / :108 `drain(stream:)`: claim; wraps backend call with reportQueueStats timing
-- :123 `watch(handler:)`: forwards to backend.watch
-- :129 `reply(to:status:artifacts:)`: guards status.isTerminal, throws .invalidTerminalStatus otherwise
-- :148 `reply(session:status:) -> Int`: fast path ONLY on PersistenceKitBackend (`as?` cast); returns 0 on FilesystemBackend (caller falls back to per-job reply)
-- :171 `reply(batch:) -> Int`: routes to backend.completeBatch; FS backend's one-scan/one-fsync path
-- :193 `reclaimInFlight(stream:) -> Int`: GATE: call ONLY immediately after DrainLease.tryAcquire SUCCEEDED for stream; fast path ONLY on PersistenceKitBackend, returns 0 otherwise
-- :204 `inFlight()` / :214 `pendingCount()` / :224 `pendingCount(stream:)`: read-only depth probes; pendingCount()+inFlight().count = total outstanding work
-- :261 `awaitDrain(pollInterval: .milliseconds(20), timeout: .seconds(30)) throws`: polls both frontiers; returns promptly if already empty; throws .drainTimeout, never hangs
-- :292 `awaitDrain(stream:pollInterval:timeout:)`: stream-scoped twin; global awaitDrain would block forever on OTHER streams' jobs a scoped drainer never claims
-- :314 `completed(streamID:)`
-- :322 `maildirSubdirs = ["tmp","new","cur","done"]`
-- :324 `ensureMaildir(root:) throws`: creates 4 subdirs if absent
-- :341 `cleanStaleTmpFiles(root:) throws`: deletes tmp/ entries older than staleTmpThreshold
+- :40 `latencyWindow: QueueLatencyWindowBox`: lock-backed, thread-safe; concurrent drain() calls (encode worker + import worker sharing an estate queue) both report through the same lock, never a raw var
+- :48 `estateTag: String = "unknown"`: nonisolated(unsafe); set ONCE at mount before any drain(), never again
+- :53 `init(root:hlcGenerator:) throws`: see ENTRY POINTS
+- :66 `init(backend:root:)`: see ENTRY POINTS
+- :73 `send(_:)` / :82 `send(batch:) -> Int`: writeBatch twin; FS backend fsyncs new/ ONCE for the batch
+- :86 `drain()` / :109 `drain(stream:)`: claim; wraps backend call with reportQueueStats timing
+- :124 `watch(handler:)`: forwards to backend.watch
+- :130 `reply(to:status:artifacts:)`: guards status.isTerminal, throws .invalidTerminalStatus otherwise
+- :149 `reply(session:status:) -> Int`: fast path ONLY on PersistenceKitBackend (`as?` cast); returns 0 on FilesystemBackend (caller falls back to per-job reply)
+- :172 `reply(batch:) -> Int`: routes to backend.completeBatch; FS backend's one-scan/one-fsync path
+- :194 `reclaimInFlight(stream:) -> Int`: GATE: call ONLY immediately after DrainLease.tryAcquire SUCCEEDED for stream; fast path ONLY on PersistenceKitBackend, returns 0 otherwise
+- :205 `inFlight()` / :215 `pendingCount()` / :225 `pendingCount(stream:)`: read-only depth probes; pendingCount()+inFlight().count = total outstanding work
+- :275 `awaitDrain(pollInterval: .milliseconds(20), timeout: .seconds(30)) throws`: polls both frontiers; returns promptly if already empty; PROGRESS-BASED deadline (resets whenever outstanding drops below its lowest seen value, not a total wall-clock cap); throws .drainTimeout only on a true stall, never hangs
+- :319 `awaitDrain(stream:pollInterval:timeout:)`: stream-scoped twin; same progress-based deadline; global awaitDrain would block forever on OTHER streams' jobs a scoped drainer never claims
+- :349 `completed(streamID:)`
+- :357 `maildirSubdirs = ["tmp","new","cur","done"]`
+- :359 `ensureMaildir(root:) throws`: creates 4 subdirs if absent
+- :376 `cleanStaleTmpFiles(root:) throws`: deletes tmp/ entries older than staleTmpThreshold
 
 ### Backend contract: QueueBackend.swift
 - :9 `protocol QueueBackend: Sendable`
@@ -154,9 +154,11 @@ ENTRY POINTS (most callers need only these):
 - :240 `final class ContinuationBox`: bridges DispatchSource cancel handler (DispatchQueue callback) to async wait()
 
 ### Telemetry: QueueKitTelemetry.swift (off-path cost ~1ns; metric namespace `queue.*`)
-- :27 `struct QueueLatencyWindow`: capacity-100 rolling sample list
-- :44 `percentile(_:) -> Double`: P7-secfix: guards non-finite/out-of-range p BEFORE index computation (NaN/inf could crash)
-- :68 `reportQueueStats(backend:drained:drainStart:now:estateTag:window:) async`: gate: `Intellectus.isEnabled`; emits queue.depth (or queue.depth_unavailable on read failure: NEVER fabricates 0), queue.drain_count, queue.idle_nonempty (skipped if depth unknown), queue.latency_p50_ms, queue.latency_p95_ms, queue.head_of_line_age_s
+- :31 `struct QueueLatencyWindow`: capacity-100 rolling sample list; NOT itself synchronized, concurrent access goes through the box below
+- :48 `percentile(_:) -> Double`: P7-secfix: guards non-finite/out-of-range p BEFORE index computation (NaN/inf could crash)
+- :70 `final class QueueLatencyWindowBox: Sendable`: Mutex-backed thread-safe holder; encode worker and import worker share one window across concurrent drain() calls
+- :79 `sample(_:) -> (p50: Double, p95: Double)`: appends the sample and reads both percentiles under ONE lock acquisition, so concurrent drains cannot interleave append and read
+- :103 `reportQueueStats(backend:drained:drainStart:now:estateTag:window: QueueLatencyWindowBox) async`: gate: `Intellectus.isEnabled`; emits queue.depth (or queue.depth_unavailable on read failure: NEVER fabricates 0), queue.drain_count, queue.idle_nonempty (skipped if depth unknown), queue.latency_p50_ms, queue.latency_p95_ms, queue.head_of_line_age_s; window param is now the box, not an inout raw window
 
 ## INVARIANTS / GOTCHAS
 
@@ -170,8 +172,8 @@ ENTRY POINTS (most callers need only these):
 - PersistenceKitBackend.watch()'s observer event is a WAKE SIGNAL ONLY (invariant 2): never read job data from the TableChange event; always re-enter through drainAvailable(). drainUntilEmpty must propagate claim errors, never `try? ?? []`, or a live fault silently reads as "queue empty."
 - appendOnly MUST stay false on the queuekit_jobs table declaration (invariant 5): rows are mutated in place through the new→cur→done lifecycle.
 - FilesystemBackend.completeBatch's jobID lookup keys on the filename suffix after the LAST `-`. This is only unambiguous because JobIDs are 32 dashless hex characters (JobID.generate()); a job id containing a `-` would break this index.
-- estateTag on QueueKit is `nonisolated(unsafe)`: set it ONCE at mount, before any drain() call, never again during concurrent use. Same discipline for the internal latencyWindow.
-- awaitDrain / awaitDrain(stream:) are polling latches (20ms default interval, 30s default timeout), not push notifications: there is no native "queue just emptied" event on either backend. Always returns promptly on an already-empty queue; always throws QueueError.drainTimeout rather than hanging past the deadline.
+- estateTag on QueueKit is `nonisolated(unsafe)`: set it ONCE at mount, before any drain() call, never again during concurrent use. The internal latencyWindow does NOT follow this discipline: it is a `QueueLatencyWindowBox`, lock-backed, and is written on every concurrent drain() call by design (encode worker + import worker sharing an estate queue).
+- awaitDrain / awaitDrain(stream:) are polling latches (20ms default interval, 30s default timeout), not push notifications: there is no native "queue just emptied" event on either backend. Always returns promptly on an already-empty queue. The timeout is PROGRESS-BASED, not a total wall-clock cap: it resets every time outstanding (pending+inFlight) drops below its lowest observed value, so a slow-but-progressing drain never false-times-out. Only a true stall (no frontier movement for the full timeout) throws QueueError.drainTimeout.
 - Telemetry never fabricates queue.depth=0 on a read failure: it emits queue.depth_unavailable instead, and skips every metric that depends on a known depth. Do not "simplify" this to `(try? pendingCount()) ?? 0`.
 - Watcher wakes are ALWAYS advisory/spurious-tolerant. drainAvailable() (via atomic rename / serializable UPDATE) is the sole claim authority on every platform.
 - DrainLease is heartbeat-TTL, not PID-liveness: worst-case takeover latency is one full TTL (15s). Do not add OS-specific process-liveness checks; portability across macOS/Linux/Windows is a design constraint, not an oversight.

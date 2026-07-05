@@ -20,9 +20,9 @@ sources:
   - path: Sources/QueueKit/QueueError.swift
     blob: 2697c4b7404b9e04259267cd8f4008030ebb6754
   - path: Sources/QueueKit/QueueKit.swift
-    blob: 60dfaa1e8f92ec051810b50d8b9cadc47388c02f
+    blob: 3878243f6da8ad1b55bba5271f7502e8d6b8e3d7
   - path: Sources/QueueKit/QueueKitTelemetry.swift
-    blob: 29024f112bf133012283205175aa336b8d80d7c9
+    blob: 0e656863d2c9f8e83dc13fc8b6b94ae2f25ecf06
   - path: Sources/QueueKit/Watcher.swift
     blob: cf2b270b9c60da34f7a25c016f8c18b6ba6149e4
 ---

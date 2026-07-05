@@ -20,9 +20,9 @@ sources:
   - path: Sources/QueueKit/QueueError.swift
     blob: 2697c4b7404b9e04259267cd8f4008030ebb6754
   - path: Sources/QueueKit/QueueKit.swift
-    blob: 60dfaa1e8f92ec051810b50d8b9cadc47388c02f
+    blob: 3878243f6da8ad1b55bba5271f7502e8d6b8e3d7
   - path: Sources/QueueKit/QueueKitTelemetry.swift
-    blob: 29024f112bf133012283205175aa336b8d80d7c9
+    blob: 0e656863d2c9f8e83dc13fc8b6b94ae2f25ecf06
   - path: Sources/QueueKit/Watcher.swift
     blob: cf2b270b9c60da34f7a25c016f8c18b6ba6149e4
 ---
@@ -198,9 +198,11 @@ which backend is mounted underneath.
 
 `QueueKit` holds four properties. It holds a `backend`, anything
 conforming to `QueueBackend`. It holds an optional `root` URL, present
-only when the mounted backend is a filesystem backend. It holds a rolling
-latency window for telemetry. It holds an `estateTag` string, used to tag
-telemetry metrics by estate.
+only when the mounted backend is a filesystem backend. It holds a
+latency window for telemetry, wrapped in `QueueLatencyWindowBox` for
+thread safety. Two streams can drain the same queue at once. Their
+reports must not corrupt the shared sample list. It holds an
+`estateTag` string, used to tag telemetry metrics by estate.
 
 Two initializers exist. `init(root:hlcGenerator:)` is the common path. It
 builds a `FilesystemBackend` at the given root, and it cleans any stale
@@ -279,11 +281,15 @@ iteration re-reads the live counts. Progress made by a concurrently
 running drain worker between polls is therefore observed on the very next
 tick.
 
-Both methods return promptly when the queue is already empty. The first
-check can succeed without the method ever sleeping. Both methods throw
-`QueueError.drainTimeout` rather than blocking forever, if the deadline
-passes with work still outstanding. A stuck or crashed drain worker
-therefore surfaces as an error, instead of as a hang.
+Both methods return promptly when the queue is already empty. The
+first check can succeed without the method ever sleeping. The timeout
+measures time without progress. It does not cap the total wait. Each
+method tracks the lowest outstanding count seen so far. Every poll
+that sees a lower count resets the deadline. A drain that keeps
+shrinking the queue, even slowly, never times out. Only a stalled
+drain, with no frontier movement for the full timeout, throws
+`QueueError.drainTimeout`. A stuck or crashed drain worker therefore
+surfaces as an error, instead of as a hang.
 
 `ensureMaildir(root:)` and `cleanStaleTmpFiles(root:)` are the maildir
 directory-management helpers that `FilesystemBackend`'s initializer calls.
@@ -582,9 +588,10 @@ rather than inside Swift's structured concurrency.
 
 ## QueueKitTelemetry.swift
 
-This file provides `QueueLatencyWindow` and `reportQueueStats`. These are
-the self-report telemetry QueueKit emits through IntellectusLib,
-MOOTx01's telemetry library, after every `drain()` call.
+This file provides `QueueLatencyWindow`, `QueueLatencyWindowBox`, and
+`reportQueueStats`. These are the self-report telemetry QueueKit emits
+through IntellectusLib, MOOTx01's telemetry library, after every
+`drain()` call.
 
 The reporting path is additive, and it is deliberately cheap when
 unused. The very first check inside `reportQueueStats` is a single
@@ -603,6 +610,16 @@ zero and one hundred, for example `NaN` or a value produced by a
 caller's arithmetic error, returns `0` rather than computing an array
 index from it. Converting a non-finite floating-point value to an
 integer index can crash the program outright on some inputs.
+
+`QueueLatencyWindowBox` wraps `QueueLatencyWindow` in a lock. Two
+drainers can share one `QueueKit` instance. An encode worker and an
+import worker can each drain the same per-estate queue at once.
+Without a lock, two concurrent appends could corrupt the sample
+array's storage. `reportQueueStats` now takes the box, not the raw
+window. It calls `sample(_:)` once per drain call. `sample(_:)`
+appends the new latency sample. It also reads both percentiles under
+one lock acquisition. No two drains can interleave between the append
+and the read this way.
 
 `reportQueueStats` treats a failed `pendingCount()` read as its own
 signal, rather than as a zero. Reporting `queue.depth = 0` when the read

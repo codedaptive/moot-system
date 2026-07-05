@@ -76,7 +76,7 @@ sources:
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLIdentifierValidator.swift
     blob: 120cf0c1576a7db45d79bf6865e2f15cff09a5ac
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLPool.swift
-    blob: eddc0c3af4135565e15d2d763b0d24240973dd6f
+    blob: 98dc0350228421361e43d1a363cb81989f790c91
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLPredicateCompiler.swift
     blob: 6f0791e0372b09cf2605bae4cf149e48bbba2834
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLSchema.swift
@@ -94,7 +94,7 @@ sources:
   - path: Sources/PersistenceKitSQLite/KeychainKeyStore.swift
     blob: 0071732291a7cb6ce0777bd230a6188276fb4f32
   - path: Sources/PersistenceKitSQLite/SQLiteConnection.swift
-    blob: ece56dc7e25e67656bb37f5222c18c1166c750cc
+    blob: d1e0aee8f4dceb815b24c3aac619ad71b4edcae9
   - path: Sources/PersistenceKitSQLite/SQLiteIdentifierValidator.swift
     blob: 713339c137d6af1cfbba5a3584e05bdda70b42c5
   - path: Sources/PersistenceKitSQLite/SQLiteObserver.swift
@@ -104,7 +104,7 @@ sources:
   - path: Sources/PersistenceKitSQLite/SQLiteSchema.swift
     blob: 4ba6fc175fe9d486b17af1088a23da64041b12ae
   - path: Sources/PersistenceKitSQLite/SQLiteStorage.swift
-    blob: 417e63cc07b60295ac874187ebb796bf9f3b3c86
+    blob: 2c73892fba5b5b4c6608dac070b1c2159f4538c6
   - path: Sources/PersistenceKitSQLite/SQLiteStores.swift
     blob: 76499ffb70d979f0d13e8cf9e32bc38ff28ffdb5
 ---
@@ -283,14 +283,22 @@ ENTRY POINTS (most callers need only these):
 ### Backend: PersistenceKitSQLite
 - SQLiteStorage.swift:22 `final class SQLiteStorage: Storage, Sendable`: one connection per estate
 - SQLiteStorage.swift:110 `actor SQLiteBackend`: owns connection + inTransaction flag + pendingBlobNotifications (buffered during txn, SECFIX-WS2-PK F3)
-- SQLiteStorage.swift:411 `insertRow` / :461 `upsertRow` / :495 `updateRows` / :535 `deleteRows` / :559 `queryRows`: ALL validate every table/column identifier via `validateSQLIdentifier` before interpolation (SECFIX-WS2-PK F9); insertRow+queryRows run RowCrypto encrypt/decrypt seam
-- SQLiteStorage.swift:656 `queryRowsSkipCorrupt(...)`: cursor-level per-row skip+log on corruptStoredValue; other errors re-thrown (systemic)
-- SQLiteStorage.swift:782 `storageStats(now:)`: PRAGMA page_size/page_count/freelist_count; WAL frame count derived from `-wal` FILE SIZE (NOT PRAGMA wal_checkpoint: can SQLITE_LOCKED even same-actor)
-- SQLiteStorage.swift:917 `readColumn(...)`: type-tolerant decode (valid-but-coerced value passes through) vs. parse-failure (unparseable UUID/timestamp TEXT) → THROWS corruptStoredValue, never fabricates
+- SQLiteStorage.swift:334 `runTransaction(isolation:_:)`: on `inTransaction==true`, WAITS (poll every 25ms, cap 60s) instead of throwing on sight, ordinary contention between two async callers suspended in `block`; wait-expired ⇒ transactionConflict; true self-reentrant nesting still fails this way (never hangs)
+- SQLiteStorage.swift:396 `beginTransactionDirect()`: unchanged immediate-throw on `inTransaction==true` (synchronous call site, cannot await a wait)
+- SQLiteStorage.swift:429 `insertRow` / :483 `upsertRow` / :521 `updateRows` / :565 `deleteRows` / :593 `queryRows`: ALL validate every table/column identifier via `validateSQLIdentifier` before interpolation (SECFIX-WS2-PK F9); insertRow+queryRows run RowCrypto encrypt/decrypt seam; ALL FIVE (+ queryRowsSkipCorrupt/fetchMatchingRowKeys/countRows/iterateAudit) now call `connection.prepareCached(_:)` not `connection.prepare(_:)` (see SQLiteConnection.swift statement cache below)
+- SQLiteStorage.swift:694 `queryRowsSkipCorrupt(...)`: cursor-level per-row skip+log on corruptStoredValue; other errors re-thrown (systemic)
+- SQLiteStorage.swift:824 `storageStats(now:)`: PRAGMA page_size/page_count/freelist_count; WAL frame count derived from `-wal` FILE SIZE (NOT PRAGMA wal_checkpoint: can SQLITE_LOCKED even same-actor)
+- SQLiteStorage.swift:967 `readColumn(...)`: type-tolerant decode (valid-but-coerced value passes through) vs. parse-failure (unparseable UUID/timestamp TEXT) → THROWS corruptStoredValue, never fabricates
 - SQLiteConnection.swift:24 `final class SQLiteConnection: @unchecked Sendable`: thin sqlite3 C API wrapper
 - SQLiteConnection.swift:29 `init(url:busyTimeout:keyHex:)`: ORDER MATTERS: symlink-refusal check (CAND-052, lstat semantics) → sqlite3_open_v2 → PRAGMA key (Mode3, MUST be first stmt) → Apple Data Protection → WAL/synchronous/busy_timeout/foreign_keys pragmas
-- SQLiteConnection.swift:162 `final class SQLiteStatement`: prepared-stmt wrapper; :180 `bind(_:at:)` TypedValue→sqlite3_bind_*; :239 `step()`
-- SQLiteConnection.swift:318 `enum ISO8601`: :356 `string(from:)` clamps Date to RFC-3339 range [0001,9999] before formatting (logs warning on clamp, never emits unparseable-back string); :392 `date(from:)` tries :412 `fastParseCanonicalUTC` FIRST (allocation-free, handles the exact canonical shape this kit writes: Merkle rollup re-decode was ~80% of CPU via ICU formatter before this fast path), falls back to ISO8601DateFormatter for anything else
+- SQLiteConnection.swift:102 `close()`: destroys every cached statement FIRST (loop over statementCache), THEN sqlite3_close_v2; sqlite3_close_v2 defers the real close while any prepared stmt survives, so skipping this order leaves a zombie connection
+- SQLiteConnection.swift:156 `statementCache: [String: SQLiteStatement]` (:157 capacity 128): per-connection cache keyed by SQL text; at-capacity eviction destroys+rebuilds the WHOLE cache (crude, O(1) amortized); mirrors Rust rusqlite prepare_cached
+- SQLiteConnection.swift:177 `prepareCached(_:)`: CHECKOUT semantics (mirrors rusqlite): statement REMOVED from cache slot while in use, returned by its own finalize(); a reentrant same-SQL call misses the now-empty slot and prepares fresh instead of clobbering the in-flight statement
+- SQLiteConnection.swift:197 `returnToCache(_:)`: called from a cached statement's finalize(); if the slot is already occupied (reentrant duplicate), destroys the returner instead of clobbering the resident
+- SQLiteConnection.swift:217 `final class SQLiteStatement`: prepared-stmt wrapper; :225 `isCached` / :228 `cacheKey` set by prepareCached, read by finalize(); :269 `bind(_:at:)` TypedValue→sqlite3_bind_*; :328 `step()`
+- SQLiteConnection.swift:237 `finalize()`: on a cached stmt, RETURNS it to the cache reset-for-reuse rather than destroying it; existing `defer { stmt.finalize() }` call sites need no change whether the stmt came from prepare or prepareCached
+- SQLiteConnection.swift:253 `resetForReuse()` (sqlite3_reset + sqlite3_clear_bindings, cache-reuse path) / :262 `destroy()` (unconditional sqlite3_finalize, used by cache eviction + close())
+- SQLiteConnection.swift:407 `enum ISO8601`: :445 `string(from:)` clamps Date to RFC-3339 range [0001,9999] before formatting (logs warning on clamp, never emits unparseable-back string); :481 `date(from:)` tries :501 `fastParseCanonicalUTC` FIRST (allocation-free, handles the exact canonical shape this kit writes: Merkle rollup re-decode was ~80% of CPU via ICU formatter before this fast path), falls back to ISO8601DateFormatter for anything else
 - SQLiteStores.swift:22 `final class SQLiteRowStore: RowStore, Sendable`: forwards to SQLiteBackend; :75 `querySkipCorrupt` overrides protocol default with real cursor-level skip
 - SQLiteStores.swift:90/102/119 `SQLiteBlobStore` / `SQLiteAuditLog` / `SQLiteTransaction`: thin forwards
 - SQLiteSchema.swift:9 `enum SQLiteSchema`: :12 `nativeType(_:)` ColumnType→SQLite storage class (.uuid/.timestamp→TEXT, .hlc→INTEGER packed, .fingerprint→BLOB); :29 `createTable(_:)`; :68 `appendOnlyTriggers(_:)` emits BEFORE UPDATE/DELETE RAISE(ABORT) trigger pair
@@ -308,7 +316,9 @@ ENTRY POINTS (most callers need only these):
 - PostgreSQLStorage.swift:246 `storageStats(now:)`: pg_database_size / pg_stat_database (blks_hit,blks_read,xact_commit,xact_rollback,deadlocks) / pg_locks⋈pg_database (granted=false ⇒ lockContention)
 - PostgreSQLPool.swift:12 `actor PostgreSQLPool`: fixed-size; :38 `acquire()` reuse→open-new(if under size)→CheckedContinuation-wait w/ timeout→poolExhausted
 - PostgreSQLPool.swift:101 `openConnection()`: every new conn: CREATE SCHEMA IF NOT EXISTS + SET search_path, closes conn on setup failure (never hands back half-configured conn)
-- PostgreSQLPool.swift:168 `parseTLSMode(host:)`: `ARIA_MCP_POSTGRES_TLS` env var: disable|require|(absent/unrecognized→prefer, incl. loopback: explicit opt-out required for plaintext)
+- PostgreSQLPool.swift:178 `parseTLSMode(host:dsnSSLMode:)`: effective mode = MAX(DSN `sslmode=` via :219 `sslMode(from:)`, `ARIA_MCP_POSTGRES_TLS` env var) computed by :203 `effectiveTLSDecision(dsnSSLMode:envValue:)` (SECFIX-C-PG-SWIFT-TLS-SSLMODE, parity w/ Rust `postgres_tls::effective_sslmode`); env may RAISE never LOWER the DSN's requirement; absent+absent→prefer, incl. loopback (explicit opt-out required for plaintext)
+- PostgreSQLPool.swift:197 `enum TLSDecision`: disable|prefer|require (the 3 PostgresNIO outcomes; extracted for unit-testability w/o a live server/NIOSSLContext)
+- PostgreSQLPool.swift:231 `private enum TLSModeRank`: weakest→strongest ranking for libpq sslmode values: disable<allow<prefer<require<verifyCA<verifyFull<unknownRequireTLS; an unrecognized DSN value ranks `unknownRequireTLS` (fail-closed above every named mode, a typo never silently drops to plaintext); previously the DSN's sslmode was ignored entirely, so `?sslmode=require`/`verify-ca`/`verify-full` could still open a plaintext connection
 - PostgreSQLConnection.swift:23 `PostgresConnection` ext: :25 `executeSimple` / :33 `executeParameterized` wrap postgres-nio errors as StorageError.backendError
 - PostgreSQLConnection.swift:45 `makeBindings(_:)`: TypedValue→PostgresBindings; .fingerprint serialized as 32 raw bytes fixed block order
 - PostgreSQLConnection.swift:103/116 `decodeRow(_:columns:)` / `decodeCell(_:type:)`: decode failure → `.null` (NOT a throw: PG wire protocol already enforces column types at a lower level than SQLite affinity)
@@ -359,5 +369,8 @@ ENTRY POINTS (most callers need only these):
 - HLC.packed truncates physicalTime to 40 bits: lossy for far-future timestamps. SQLite's `_storagekit_audit` table therefore stores physical_time/logical_count/node_id as separate full-precision columns alongside the packed value; decode from those three columns, not from unpacking the packed column, or a cold rebuild's lastHLC can silently disagree with a snapshot's.
 - ISO8601 fast-path parser (`fastParseCanonicalUTC`) exists purely for CPU cost: the general ISO8601DateFormatter was measured at ~80% of total CPU during large imports (Merkle rollup re-decodes every row's timestamp on every insert). The fast path recognizes ONLY the exact canonical shape this kit writes and returns nil (triggering formatter fallback) for anything else: never weaken its exactness to "handle more cases," that reintroduces the cost it exists to avoid.
 - NovelTokenTaggerChoice is FIXED AT ESTATE CREATION in v1.0: no change-after-creation path exists yet. `.nlTagger` estates cannot safely federate with `.hmm` estates without full re-tagging; this is not yet enforced automatically (v1.1 work): caller discipline is the only guard today.
+- PostgreSQL TLS mode (SECFIX-C-PG-SWIFT-TLS-SSLMODE): `parseTLSMode` now reads BOTH the DSN's `sslmode=` query parameter and `ARIA_MCP_POSTGRES_TLS`, taking the stronger of the two via TLSModeRank. Never go back to reading only the env var: an earlier version ignored the DSN's `sslmode` entirely, so `?sslmode=require`/`verify-ca`/`verify-full` could still open a plaintext connection. An unrecognized DSN value ranks above every named mode (fail-closed to require), never as disable.
+- SQLiteBackend.runTransaction WAITS on contention (poll 25ms, cap 60s) rather than throwing transactionConflict on sight, because the actor can suspend inside an async `block` and a second concurrent caller landing here is ordinary contention, not a bug. `beginTransactionDirect` (the synchronous explicit-boundary path) is unchanged and still throws immediately: it cannot await a wait.
+- SQLiteConnection's per-connection statement cache (`prepareCached`/`returnToCache`, cap 128) is a performance path, not a correctness one: a cached `SQLiteStatement`'s `finalize()` returns it to the cache instead of destroying it, so `close()` MUST destroy every cached statement before calling `sqlite3_close_v2`, or the connection never truly closes (SQLite defers close while any prepared statement survives).
 - Pinned/deterministic constants: sensitivityThreshold clamp ≤2, Secret ordinal ==3 always excluded, SQL identifier pattern `[A-Za-z_][A-Za-z0-9_]*`, ciphertext envelope layout [12-byte nonce][16-byte tag][ciphertext], KeychainKeyStore.keyByteCount=32, RFC-3339 round-trip range [0001-01-01, 9999-12-31].
 - PersistenceKit imports NO vector-search engine and must never grow one: the ACCOMMODATION contract (vector payload round-trip, bulk hydration, count, delete via the general RowStore/BlobStore surfaces) is the full extent of this package's obligation toward VectorKit's workload (ADR-008).

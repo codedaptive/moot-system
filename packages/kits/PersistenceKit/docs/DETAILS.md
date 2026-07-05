@@ -76,7 +76,7 @@ sources:
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLIdentifierValidator.swift
     blob: 120cf0c1576a7db45d79bf6865e2f15cff09a5ac
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLPool.swift
-    blob: eddc0c3af4135565e15d2d763b0d24240973dd6f
+    blob: 98dc0350228421361e43d1a363cb81989f790c91
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLPredicateCompiler.swift
     blob: 6f0791e0372b09cf2605bae4cf149e48bbba2834
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLSchema.swift
@@ -94,7 +94,7 @@ sources:
   - path: Sources/PersistenceKitSQLite/KeychainKeyStore.swift
     blob: 0071732291a7cb6ce0777bd230a6188276fb4f32
   - path: Sources/PersistenceKitSQLite/SQLiteConnection.swift
-    blob: ece56dc7e25e67656bb37f5222c18c1166c750cc
+    blob: d1e0aee8f4dceb815b24c3aac619ad71b4edcae9
   - path: Sources/PersistenceKitSQLite/SQLiteIdentifierValidator.swift
     blob: 713339c137d6af1cfbba5a3584e05bdda70b42c5
   - path: Sources/PersistenceKitSQLite/SQLiteObserver.swift
@@ -104,7 +104,7 @@ sources:
   - path: Sources/PersistenceKitSQLite/SQLiteSchema.swift
     blob: 4ba6fc175fe9d486b17af1088a23da64041b12ae
   - path: Sources/PersistenceKitSQLite/SQLiteStorage.swift
-    blob: 417e63cc07b60295ac874187ebb796bf9f3b3c86
+    blob: 2c73892fba5b5b4c6608dac070b1c2159f4538c6
   - path: Sources/PersistenceKitSQLite/SQLiteStores.swift
     blob: 76499ffb70d979f0d13e8cf9e32bc38ff28ffdb5
 ---
@@ -925,6 +925,21 @@ least one caller calls `migrate(to:)` directly. It handles this by
 re-running the safe-to-repeat table- and migrations-table-creation
 steps before it checks what actually needs to migrate.
 
+`runTransaction(isolation:_:)` waits for an already-open transaction
+on the same actor rather than failing right away. The block it runs
+is async, so the actor can suspend inside it. A second caller can then
+reach this method while the first transaction is still open. That is
+ordinary contention between two background workers. A Merkle rollup
+and a live capture racing each other is one example. It is not a
+programming error, so `runTransaction` no longer throws on sight. It
+polls every twenty-five milliseconds instead, for up to sixty seconds
+total. Only a wait that runs out the whole span throws
+`StorageError.transactionConflict`. A true nested call, one that
+reenters `runTransaction` from inside its own block, still fails this
+way rather than hanging forever. The older, explicit
+`beginTransactionDirect()` path keeps its immediate throw. It is a
+synchronous method and cannot wait on anything.
+
 Five row-changing methods start by calling `validateSQLIdentifier`
 on every table and column name they are about to place into a SQL
 string: `insertRow`, `upsertRow`, `updateRows`, `deleteRows`, and
@@ -938,6 +953,14 @@ seam actually runs. `insertRow` calls `encryptedForWrite` before
 binding values. `queryRows` calls `decryptedForRead` after reading
 them back. Both are no-ops on a plaintext or whole-database-encrypted
 estate.
+
+Four more methods reuse this same cache: `queryRowsSkipCorrupt`,
+`fetchMatchingRowKeys`, `countRows`, and `iterateAudit`. All nine call
+`connection.prepareCached(_:)` in place of `connection.prepare(_:)`.
+`SQLiteConnection.swift`, covered next, describes the statement cache
+this feeds. The same SQL text repeats call after call in a bulk loop,
+such as a large import. Parsing it fresh every time was a measured
+hot spot. Reusing a parsed statement removes that cost.
 
 `readColumn(stmt:index:schema:columnName:table:)` is the file's most
 carefully reasoned function. It decides, column by column, whether a
@@ -988,6 +1011,24 @@ Protection, a best-effort step that layers OS-level at-rest
 protection on top of SQLCipher's own encryption. It sets the durability pragmas last: WAL journal mode, `NORMAL`
 synchronous durability, a WAL auto-checkpoint limit, a busy timeout,
 and foreign-key rules.
+
+`SQLiteConnection` also owns a per-connection cache of prepared
+statements, capped at one hundred twenty-eight entries.
+`prepareCached(_:)` looks up that cache by the raw SQL text. On a
+repeat call with the same text, it returns the cached statement
+instead of parsing fresh SQL. That returned statement already has its
+old bindings cleared and its execution state reset. The cache
+checks a statement out while a caller holds it, the way the Rust
+port's `rusqlite` cache does. A cached `SQLiteStatement` returns
+itself to the cache when its own `finalize()` runs, instead of being
+destroyed outright. A call site's existing `defer { stmt.finalize() }`
+line needs no change to gain this reuse. Going past the cache's cap
+destroys and rebuilds the whole cache at once, a crude but
+constant-time way to stay bounded. `close()` destroys every cached
+statement first, before it calls `sqlite3_close_v2`. SQLite defers the
+real close while any prepared statement on the connection still
+exists, so skipping this step first would leave a zombie connection
+behind.
 
 `ISO8601` deserves its own close look. Two very different stories
 about speed and correctness live inside it. `string(from:)` first pins an out-of-range `Date` into the range
@@ -1170,14 +1211,25 @@ The connection is closed rather than kept if that two-step setup fails
 partway through, so a half-set-up connection is never handed back to
 a caller.
 
-`parseTLSMode(host:)` works out the pool's TLS behavior from the
-`ARIA_MCP_POSTGRES_TLS` environment variable. It defaults to `prefer`,
-meaning try TLS first and fall back to plaintext if the server does
-not offer it, whenever the variable is missing or holds a value it
-does not know. The comment is clear that even a loopback connection
-defaults to `prefer` rather than `disable`. A caller who truly wants
-plaintext on loopback has to say so on purpose, rather than getting it
-by accident.
+`parseTLSMode(host:dsnSSLMode:)` now weighs two sources together. One
+is the DSN's own `sslmode=` query parameter, read out by the private
+`sslMode(from:)` helper. The other is the `ARIA_MCP_POSTGRES_TLS`
+environment variable, as before. The pure function
+`effectiveTLSDecision(dsnSSLMode:envValue:)` picks between them. It
+ranks each value with the private `TLSModeRank` enum, from `disable`
+at the weak end up through `verifyFull`. The effective mode is always
+the stronger of the two ranks. The environment variable may raise the
+required security level above what the DSN asked for. It can never
+lower that level. This closes a real gap in the earlier version. A
+DSN of `?sslmode=require` used to be ignored outright, so a connection
+could still open in plain text. An unrecognized DSN value now ranks
+as `unknownRequireTLS`, above every named mode. A typo in the DSN
+therefore fails closed to full TLS, rather than dropping quietly to
+plain text. An absent DSN mode paired with an absent environment
+variable still defaults to `prefer`, matching `libpq`'s own default.
+Even a loopback connection gets this same default rather than
+`disable`. A caller who truly wants plain text on loopback has to say
+so on purpose, rather than getting it by accident.
 
 ### PostgreSQLConnection.swift
 
