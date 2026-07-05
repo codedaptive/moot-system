@@ -21,7 +21,7 @@ sources:
   - path: Sources/PersistenceKit/SnapshotRegistry.swift
     blob: 88087bda544165c4d24c514a4f3e0641a620512e
   - path: Sources/PersistenceKitSQLite/SQLiteStorage.swift
-    blob: 417e63cc07b60295ac874187ebb796bf9f3b3c86
+    blob: 2c73892fba5b5b4c6608dac070b1c2159f4538c6
   - path: Sources/PersistenceKitSQLite/KeychainKeyStore.swift
     blob: 0071732291a7cb6ce0777bd230a6188276fb4f32
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLStorage.swift
