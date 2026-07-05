@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+doc: topology
+package: PersistenceKit
+repo: moot-system
+authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
+authored_date: 2026-07-04
+sources:
+  - path: Sources/PersistenceKit/Storage.swift
+    blob: 7484a40913b28cb11a6bd2e3ea822dc8fe8eb63e
+  - path: Sources/PersistenceKit/RowStore.swift
+    blob: 9a96ff89528ca786d51224324cacb78cf810037d
+  - path: Sources/PersistenceKit/CachingRowStore.swift
+    blob: 7edf9a86eb31dd9a17abd97b7baa9e8d5425e266
+  - path: Sources/PersistenceKit/HashingRowStore.swift
+    blob: fe233ed2f4fda177373ad105d14fa321d325d0df
+  - path: Sources/PersistenceKit/RowCrypto.swift
+    blob: 6678e426c0902cdae6d164904001526756e40916
+  - path: Sources/PersistenceKit/ErasureOverlay.swift
+    blob: d5a86f2baa10647134f285d6996a8e62cbe23ace
+  - path: Sources/PersistenceKit/SnapshotRegistry.swift
+    blob: 88087bda544165c4d24c514a4f3e0641a620512e
+  - path: Sources/PersistenceKitSQLite/SQLiteStorage.swift
+    blob: 417e63cc07b60295ac874187ebb796bf9f3b3c86
+  - path: Sources/PersistenceKitSQLite/KeychainKeyStore.swift
+    blob: 0071732291a7cb6ce0777bd230a6188276fb4f32
+  - path: Sources/PersistenceKitPostgreSQL/PostgreSQLStorage.swift
+    blob: 849926f9e6def788fae2f38757ad44bcd52a18a0
+  - path: Sources/PersistenceKitInMemory/InMemoryStorage.swift
+    blob: 9820c771bfe39ab738eea1f3b1623491fcfb1326
+  - path: Sources/PersistenceKitReplication/StorageReplicator.swift
+    blob: f5acc5993c8647e53c127c6871a1282c24b1c427
+  - path: Sources/PersistenceKitReplication/IncrementalReplicationSession.swift
+    blob: 2f90378146e043d75c739d400d98c7770e07af78
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="700" viewBox="0 0 1000 700" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#333"/>
+    </marker>
+  </defs>
+
+  <style>
+    .box    { fill: #ffffff; stroke: #333; stroke-width: 1.5; }
+    .ext    { fill: #f4f4f4; stroke: #777; stroke-width: 1.2; }
+    .label  { font-size: 13px; fill: #111; }
+    .sub    { font-size: 10.5px; fill: #555; }
+    .flow   { stroke: #333; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+    .cross  { stroke: #777; stroke-width: 1.3; fill: none; marker-end: url(#arrow); stroke-dasharray: 4 3; }
+    .region { fill: none; stroke: #999; stroke-width: 1.2; stroke-dasharray: 7 4; }
+    .regionlabel { font-size: 11px; fill: #777; font-style: italic; }
+  </style>
+
+  <!-- Title -->
+  <text x="20" y="26" font-size="15" font-weight="bold" fill="#111">PersistenceKit: one protocol, three backends, cross-cutting toolkits</text>
+
+  <!-- Calling kit -->
+  <rect class="box" x="20" y="60" width="130" height="52" rx="6"/>
+  <text class="label" x="85" y="82" text-anchor="middle">Calling kit</text>
+  <text class="sub" x="85" y="98" text-anchor="middle">any RowStore</text>
+
+  <!-- Decorator chain -->
+  <rect class="box" x="200" y="60" width="150" height="52" rx="6"/>
+  <text class="label" x="275" y="82" text-anchor="middle">HashingRowStore</text>
+  <text class="sub" x="275" y="98" text-anchor="middle">hash-on-write, dirty chain</text>
+
+  <rect class="box" x="400" y="60" width="150" height="52" rx="6"/>
+  <text class="label" x="475" y="82" text-anchor="middle">CachingRowStore</text>
+  <text class="sub" x="475" y="98" text-anchor="middle">LRU hot tier, sensitivity-gated</text>
+
+  <!-- Storage protocol -->
+  <rect class="box" x="620" y="60" width="180" height="52" rx="6"/>
+  <text class="label" x="710" y="82" text-anchor="middle">Storage protocol</text>
+  <text class="sub" x="710" y="98" text-anchor="middle">RowStore+BlobStore+AuditLog+Observer</text>
+
+  <!-- Chain arrows -->
+  <line class="flow" x1="150" y1="86" x2="198" y2="86"/>
+  <line class="flow" x1="350" y1="86" x2="398" y2="86"/>
+  <line class="flow" x1="550" y1="86" x2="618" y2="86"/>
+
+  <!-- Backends -->
+  <rect class="box" x="600" y="170" width="130" height="52" rx="6"/>
+  <text class="label" x="665" y="192" text-anchor="middle">SQLiteStorage</text>
+  <text class="sub" x="665" y="208" text-anchor="middle">one file, SQLCipher</text>
+
+  <rect class="box" x="750" y="170" width="140" height="52" rx="6"/>
+  <text class="label" x="820" y="192" text-anchor="middle">PostgreSQLStorage</text>
+  <text class="sub" x="820" y="208" text-anchor="middle">one schema per estate</text>
+
+  <rect class="box" x="450" y="170" width="130" height="52" rx="6"/>
+  <text class="label" x="515" y="192" text-anchor="middle">InMemoryStorage</text>
+  <text class="sub" x="515" y="208" text-anchor="middle">ephemeral, tests</text>
+
+  <line class="flow" x1="700" y1="112" x2="665" y2="168"/>
+  <line class="flow" x1="720" y1="112" x2="815" y2="168"/>
+  <line class="flow" x1="680" y1="112" x2="530" y2="168"/>
+
+  <!-- Keychain (Apple key store) - external region -->
+  <rect class="region" x="600" y="260" width="290" height="70"/>
+  <text class="regionlabel" x="610" y="276">Apple-only key custody</text>
+  <rect class="ext" x="615" y="285" width="260" height="35" rx="6"/>
+  <text class="label" x="745" y="307" text-anchor="middle">KeychainKeyStore: per-estate 256-bit key</text>
+  <line class="cross" x1="665" y1="222" x2="700" y2="283"/>
+
+  <!-- Cross-cutting toolkits region -->
+  <rect class="region" x="20" y="260" width="540" height="120"/>
+  <text class="regionlabel" x="30" y="278">Cross-cutting toolkits: called by name, not by inheritance</text>
+
+  <rect class="box" x="40" y="295" width="150" height="60" rx="6"/>
+  <text class="label" x="115" y="317" text-anchor="middle">RowCrypto</text>
+  <text class="sub" x="115" y="333" text-anchor="middle">AES-GCM row seam</text>
+  <text class="sub" x="115" y="347" text-anchor="middle">encrypt/decrypt write+read</text>
+
+  <rect class="box" x="210" y="295" width="170" height="60" rx="6"/>
+  <text class="label" x="295" y="317" text-anchor="middle">ErasureLedger + Overlay</text>
+  <text class="sub" x="295" y="333" text-anchor="middle">right-to-be-forgotten</text>
+  <text class="sub" x="295" y="347" text-anchor="middle">fail-closed on read</text>
+
+  <rect class="box" x="400" y="295" width="150" height="60" rx="6"/>
+  <text class="label" x="475" y="317" text-anchor="middle">SnapshotRegistry</text>
+  <text class="sub" x="475" y="333" text-anchor="middle">+ GCPin</text>
+  <text class="sub" x="475" y="347" text-anchor="middle">attested snapshots, vacuum floor</text>
+
+  <!-- cross-cutting called from every backend -->
+  <line class="cross" x1="515" y1="222" x2="475" y2="293"/>
+  <line class="cross" x1="480" y1="222" x2="200" y2="293"/>
+  <line class="cross" x1="500" y1="222" x2="115" y2="293"/>
+  <line class="cross" x1="665" y1="222" x2="150" y2="293"/>
+
+  <!-- Replication region -->
+  <rect class="region" x="20" y="420" width="870" height="220"/>
+  <text class="regionlabel" x="30" y="438">PersistenceKitReplication: operates on any two Storage instances</text>
+
+  <rect class="ext" x="60" y="470" width="150" height="50" rx="6"/>
+  <text class="label" x="135" y="490" text-anchor="middle">Source estate</text>
+  <text class="sub" x="135" y="505" text-anchor="middle">any Storage</text>
+
+  <rect class="box" x="290" y="460" width="180" height="60" rx="6"/>
+  <text class="label" x="380" y="482" text-anchor="middle">StorageReplicator</text>
+  <text class="sub" x="380" y="498" text-anchor="middle">full snapshot: rows, audit,</text>
+  <text class="sub" x="380" y="510" text-anchor="middle">blobs, one serializable txn</text>
+
+  <rect class="box" x="290" y="550" width="180" height="60" rx="6"/>
+  <text class="label" x="380" y="572" text-anchor="middle">IncrementalReplicationSession</text>
+  <text class="sub" x="380" y="588" text-anchor="middle">observer-driven dirty set,</text>
+  <text class="sub" x="380" y="600" text-anchor="middle">watermark + re-scan</text>
+
+  <rect class="ext" x="560" y="470" width="150" height="50" rx="6"/>
+  <text class="label" x="635" y="490" text-anchor="middle">Destination estate</text>
+  <text class="sub" x="635" y="505" text-anchor="middle">any Storage</text>
+
+  <line class="flow" x1="210" y1="490" x2="288" y2="488"/>
+  <line class="flow" x1="470" y1="488" x2="558" y2="490"/>
+  <line class="flow" x1="210" y1="500" x2="288" y2="575"/>
+  <line class="flow" x1="470" y1="578" x2="558" y2="500"/>
+
+  <text class="sub" x="740" y="560">Both paths read the source, then write the</text>
+  <text class="sub" x="740" y="574">destination inside one serializable transaction:</text>
+  <text class="sub" x="740" y="588">a crash mid-flush leaves the destination unchanged.</text>
+
+  <!-- Backends feed replication -->
+  <line class="cross" x1="515" y1="222" x2="135" y2="468"/>
+  <line class="cross" x1="665" y1="222" x2="635" y2="468"/>
+</svg>

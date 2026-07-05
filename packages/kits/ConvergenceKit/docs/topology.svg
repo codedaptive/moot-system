@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+doc: topology
+package: ConvergenceKit
+repo: moot-system
+authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
+authored_date: 2026-07-04
+sources:
+  - path: Sources/ConvergenceKit/SyncEngine.swift
+    blob: 32e69e0ea5002d8b699866183371527f675023cd
+  - path: Sources/ConvergenceKit/SyncRecord.swift
+    blob: 8c29f63ea9f965f1ea75d3bbff71632f76699233
+  - path: Sources/ConvergenceKit/SyncTypes.swift
+    blob: 52ed3cb07f0483d0e541b86a8da080791402d132
+  - path: Sources/ConvergenceKitCloudKit/CKRecordMapping.swift
+    blob: 9b61903296533f8044bee5a4f93ca2dc1b76b653
+  - path: Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift
+    blob: 7dd43ccf5454739a3d1ae1cda0870cf507c479c6
+  - path: Sources/ConvergenceKitFederation/FederationSyncEngine.swift
+    blob: 9bf722f8e7fc24ae12ac72d571c135da2b40af62
+  - path: Sources/ConvergenceKitNone/ConvergenceKitNone.swift
+    blob: 5d3556a08c8bc80ec6b824ceb4e0838db9c95ecc
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="620" viewBox="0 0 960 620" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#333"/>
+    </marker>
+  </defs>
+
+  <style>
+    .box   { fill: #ffffff; stroke: #333; stroke-width: 1.5; }
+    .art   { fill: #f4f4f4; stroke: #777; stroke-width: 1.2; }
+    .label { font-size: 13px; fill: #111; }
+    .sub   { font-size: 10.5px; fill: #555; }
+    .flow  { stroke: #333; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+    .loop  { stroke: #888; stroke-width: 1.3; fill: none; marker-end: url(#arrow); stroke-dasharray: 5 3; }
+    .region { fill: none; stroke: #999; stroke-width: 1.2; stroke-dasharray: 7 4; }
+    .regionlabel { font-size: 11px; fill: #777; font-style: italic; }
+  </style>
+
+  <!-- Title -->
+  <text x="20" y="28" font-size="15" font-weight="bold" fill="#111">ConvergenceKit: PersistenceKit rows in, replicated rows out</text>
+
+  <!-- Main pipeline row -->
+  <rect class="box" x="20" y="80" width="120" height="54" rx="6"/>
+  <text class="label" x="80" y="102" text-anchor="middle">Application code</text>
+  <text class="sub" x="80" y="118" text-anchor="middle">writes via PersistenceKit</text>
+
+  <rect class="box" x="190" y="80" width="170" height="54" rx="6"/>
+  <text class="label" x="275" y="102" text-anchor="middle">PersistenceKit (local)</text>
+  <text class="sub" x="275" y="118" text-anchor="middle">Storage · RowStore · StorageObserver</text>
+
+  <rect class="box" x="410" y="80" width="160" height="54" rx="6"/>
+  <text class="label" x="490" y="102" text-anchor="middle">SyncEngine</text>
+  <text class="sub" x="490" y="118" text-anchor="middle">enable · push · pull · subscribe</text>
+
+  <rect class="box" x="620" y="80" width="220" height="54" rx="6"/>
+  <text class="label" x="730" y="102" text-anchor="middle">Remote</text>
+  <text class="sub" x="730" y="118" text-anchor="middle">CloudKit database or peer's PersistenceKit</text>
+
+  <!-- Pipeline arrows -->
+  <line class="flow" x1="140" y1="106" x2="188" y2="106"/>
+  <line class="flow" x1="360" y1="106" x2="408" y2="106"/>
+  <line class="flow" x1="572" y1="98" x2="618" y2="98"/>
+  <text class="sub" x="595" y="92" text-anchor="middle">push</text>
+  <line class="flow" x1="618" y1="114" x2="572" y2="114"/>
+  <text class="sub" x="595" y="130" text-anchor="middle">pull</text>
+
+  <!-- Apply-inbound loop back to local PersistenceKit -->
+  <path class="loop" d="M 455 134 C 455 178, 320 178, 300 136"/>
+  <text class="sub" x="378" y="192" text-anchor="middle">apply inbound via RowStore -&gt; wakes local watchers</text>
+
+  <!-- Backends region -->
+  <rect class="region" x="20" y="230" width="800" height="140"/>
+  <text class="regionlabel" x="30" y="248">Backends - one enabled per PersistenceKit instance; each conforms to SyncEngine</text>
+
+  <rect class="box" x="40" y="270" width="190" height="56" rx="6"/>
+  <text class="label" x="135" y="292" text-anchor="middle">ConvergenceKitNone</text>
+  <text class="sub" x="135" y="308" text-anchor="middle">passthrough; empty receipts</text>
+
+  <rect class="box" x="270" y="270" width="210" height="56" rx="6"/>
+  <text class="label" x="375" y="292" text-anchor="middle">ConvergenceKitCloudKit</text>
+  <text class="sub" x="375" y="308" text-anchor="middle">CKRecordMapping &lt;-&gt; CKRecord</text>
+
+  <rect class="box" x="530" y="270" width="230" height="56" rx="6"/>
+  <text class="label" x="645" y="292" text-anchor="middle">ConvergenceKitFederation</text>
+  <text class="sub" x="645" y="308" text-anchor="middle">Ed25519 SignedEnvelope</text>
+
+  <!-- Backend -> SyncEngine conformance arrows -->
+  <line class="loop" x1="135" y1="268" x2="452" y2="136" opacity="0.6"/>
+  <line class="loop" x1="375" y1="268" x2="482" y2="136" opacity="0.6"/>
+  <line class="loop" x1="645" y1="268" x2="508" y2="136" opacity="0.6"/>
+
+  <!-- External systems region -->
+  <rect class="region" x="20" y="420" width="800" height="140"/>
+  <text class="regionlabel" x="30" y="438">External systems (v1.0 transport)</text>
+
+  <rect class="art" x="250" y="460" width="260" height="56" rx="6"/>
+  <text class="label" x="380" y="482" text-anchor="middle">CloudKit private database</text>
+  <text class="sub" x="380" y="498" text-anchor="middle">Apple iCloud, per-estate zone</text>
+
+  <rect class="art" x="560" y="460" width="250" height="56" rx="6"/>
+  <text class="label" x="685" y="482" text-anchor="middle">FederationRelay</text>
+  <text class="sub" x="685" y="498" text-anchor="middle">in-process inbox (v1.0)</text>
+
+  <!-- Backend -> external system arrows -->
+  <line class="flow" x1="375" y1="326" x2="380" y2="458"/>
+  <line class="flow" x1="645" y1="326" x2="685" y2="458"/>
+
+  <!-- Footnote -->
+  <text class="sub" x="480" y="600" text-anchor="middle">Cross-machine relay transport and the signed pairing handshake (HyperplaneFamilyExchange) are v1.x scope.</text>
+</svg>
