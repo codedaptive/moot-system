@@ -113,167 +113,188 @@ sources:
 
 ## What This Library Does
 
-PersistenceKit is the storage layer for MOOTx01. MOOTx01 is an on-device AI
-memory system. It stores what an AI observes over time and helps the AI
-recall it later. Every fact, drawer, and audit record that a MOOTx01 estate
-keeps passes through PersistenceKit before it reaches a disk or a database.
-An estate is one user's complete memory store in MOOTx01. PersistenceKit
-does not decide what a memory means. It decides how a memory is written,
-read, and kept safe once another kit hands it over as typed rows and bytes.
+PersistenceKit is the storage layer for MOOTx01. MOOTx01 is an on-device
+AI memory system. It stores what an AI observes over time. It later
+helps the AI recall what it observed. Every fact, drawer, and audit
+record a MOOTx01 estate keeps passes through PersistenceKit first. Only
+then does the record reach a disk or a database. An estate is one
+user's complete memory store in MOOTx01. PersistenceKit does not decide
+what a memory means. That job belongs to a higher kit. PersistenceKit
+decides how a memory is written, read, and kept safe. It takes over
+once another kit hands the memory over as typed rows and bytes.
 
-PersistenceKit gives every higher kit the same four operations — insert a
-row, fetch a blob, append an audit event, watch a table for changes — no
-matter which physical engine sits underneath. The engine can be SQLite on a
-phone, PostgreSQL on a shared server, or a plain in-memory table for a unit
-test. The kit that calls PersistenceKit writes the same code either way.
+PersistenceKit gives every higher kit the same four operations. A kit
+can insert a row. A kit can fetch a blob. A kit can append an audit
+event. A kit can watch a table for changes. This holds true no matter
+which physical engine sits underneath. The engine can be SQLite on a
+phone. It can be PostgreSQL on a shared server. It can also be a plain
+in-memory table for a unit test. The calling kit writes the same code
+in every case.
 
 ## The Problem It Solves
 
-MOOTx01 runs in more than one place. A single estate might live only on one
-iPhone, or it might run against a shared PostgreSQL server for a managed
-deployment, or it might exist only for the length of a test. Without a
-storage abstraction, every kit that reads or writes memory would have to
-know three different database APIs and three different sets of quirks.
-Worse, a kit built against SQLite could not be pointed at PostgreSQL
-without a rewrite.
+MOOTx01 runs in more than one place. A single estate might live only
+on one iPhone. It might instead run against a shared PostgreSQL server
+for a managed deployment. It might exist only for the length of a
+test. Without a storage abstraction, every kit that touches memory
+would need to know three different database APIs. Each API brings its
+own quirks. Worse, a kit built against SQLite could not point at
+PostgreSQL without a rewrite.
 
-PersistenceKit solves this with one typed contract — the `Storage`
-protocol — and three backends that all satisfy it: `PersistenceKitSQLite`,
+PersistenceKit solves this with one typed contract: the `Storage`
+protocol. Three backends satisfy that contract: `PersistenceKitSQLite`,
 `PersistenceKitPostgreSQL`, and `PersistenceKitInMemory`. A caller writes
-against `Storage`, `RowStore`, `BlobStore`, and `AuditLog` once. Swapping
-the backend means changing one line of configuration, not the calling code.
+against `Storage`, `RowStore`, `BlobStore`, and `AuditLog` exactly once.
+Swapping the backend then means changing one line of configuration. The
+calling code itself never changes.
 
-A second problem is that "one interface, three engines" is not enough by
-itself. Real deployments also need at-rest encryption, tamper-evident
-audit trails, safe deletion of sensitive content, a cache that never lies
-about what is really stored, and a way to copy an entire estate from one
-backend to another. PersistenceKit builds all of these as layers on top of
-the same four-operation core, so a kit that only needs plain rows never
-pays for the features it does not use, and a kit that needs encryption or
-replication gets it without leaving the same protocol surface.
+One interface across three engines is still not enough on its own.
+Real deployments also need at-rest encryption. They need tamper-evident
+audit trails. They need safe deletion of sensitive content. They need a
+cache that never lies about what storage truly holds. They need a way
+to copy an entire estate from one backend to another. PersistenceKit
+builds all of these as layers on top of the same four-operation core.
+A kit that only needs plain rows never pays for features it does not
+use. A kit that needs encryption or replication gets it without
+leaving the same protocol surface.
 
 PersistenceKit deliberately does not own vector similarity search. A
-separate library, VectorKit, owns dense-embedding nearest-neighbor search.
-PersistenceKit's job toward that workload is narrower: every backend must
-support the storage needs a vector index has — storing a vector payload in
-a row, reading many rows back in bulk, counting rows, and deleting rows.
-This is the accommodation contract. PersistenceKit accommodates the
-workload; it does not implement the search.
+separate library, VectorKit, owns dense-embedding nearest-neighbor
+search instead. PersistenceKit's job toward that workload stays narrow.
+Every backend must support the storage needs a vector index has. It
+must store a vector payload in a row. It must read many rows back in
+bulk. It must count rows and delete rows. Call this the accommodation
+contract.
+PersistenceKit accommodates the workload. It does not implement the
+search itself.
 
 ## How It Works
 
-At the center of the library is one protocol, `Storage`. A type conforms to
-`Storage` by providing four sub-stores — `RowStore` for typed rows,
-`BlobStore` for raw bytes keyed by string, `AuditLog` for an append-only
-history of changes, and `StorageObserver` for live change notifications —
-plus schema and transaction management. `EstateConfiguration` tells a
-`Storage` implementation which backend to open, which encryption mode to
-use, and which cache settings apply.
+One protocol sits at the center of the library: `Storage`. A type
+conforms to `Storage` by providing four sub-stores. `RowStore` handles
+typed rows. `BlobStore` handles raw bytes keyed by string. `AuditLog`
+keeps an append-only history of changes. `StorageObserver` delivers live
+change notifications. A conforming type also manages schema and
+transactions. `EstateConfiguration` tells a `Storage` implementation
+which backend to open. It also sets the encryption mode and the cache
+settings to use.
 
-A schema in PersistenceKit is not raw SQL. It is a typed Swift value —
-`SchemaDeclaration`, built from `TableDeclaration` and `ColumnDeclaration`
-values. A kit that wants to store data describes its tables once, as Swift
-structs, and each backend translates that description into its own native
-form: SQLite gets `CREATE TABLE` statements, PostgreSQL gets `CREATE TABLE`
-statements in its own dialect, and the in-memory backend just allocates a
-dictionary. Queries follow the same pattern: `StoragePredicate` is a closed
-tree of comparison and bitmap operators that each backend compiles to its
-own query language, so no caller ever writes a raw SQL string.
+A schema in PersistenceKit is not raw SQL. It is a typed Swift value
+called `SchemaDeclaration`, built from `TableDeclaration` and
+`ColumnDeclaration` values. A kit that wants to store data describes
+its tables once, as Swift structs. Each backend then translates that
+description into its own native form. SQLite gets `CREATE TABLE`
+statements. PostgreSQL gets `CREATE TABLE` statements in its own
+dialect. The in-memory backend just allocates a dictionary. Queries
+follow the same pattern. `StoragePredicate` is a closed tree of
+comparison and bitmap operators. Each backend compiles that tree to its
+own query language. No caller ever writes a raw SQL string.
 
-Three backends satisfy `Storage`. `PersistenceKitSQLite` is the on-device
-engine — one file per estate, encrypted at rest through a vendored
-SQLCipher build when the estate asks for whole-database encryption.
-`PersistenceKitPostgreSQL` is the server engine, built on the `postgres-nio`
-client, with one PostgreSQL schema per estate so many estates can share one
-database server without their tables colliding. `PersistenceKitInMemory` is
-the test and prototyping engine — no file, no network, gone when the
-process exits.
+Three backends satisfy `Storage`. `PersistenceKitSQLite` is the
+on-device engine. It uses one file per estate, encrypted at rest
+through a vendored SQLCipher build when an estate asks for
+whole-database encryption. `PersistenceKitPostgreSQL` is the server
+engine, built on the `postgres-nio` client. It gives each estate its
+own PostgreSQL schema, so many estates can share one database server
+without their tables colliding. `PersistenceKitInMemory` is the test
+and prototyping engine. It keeps no file and opens no network
+connection, and it disappears when the process exits.
 
-On top of the core protocol, PersistenceKit layers decorators and
-free-function toolkits that any backend can use without changing its own
-code:
+The core protocol also carries decorators and free-function toolkits.
+Any backend can use these without changing its own code.
 
 - `CachingRowStore` wraps a `RowStore` with an in-memory hot tier. Rows
-  above a configured sensitivity level are never cached, and the cache
-  guarantees that every read returns exactly what the backing store would
-  have returned — caching only changes speed, never correctness.
-- `HashingRowStore` wraps a `RowStore` and computes a content hash on every
-  write to a table marked hashable, then reports the write up a parent
-  chain so a Merkle-style integrity tree can stay current without a full
-  rescan.
-- `RowCrypto` and its write/read seam functions apply per-row AES-GCM
-  encryption to a table's `content` column when an estate is configured for
-  row-level encryption, independent of whichever backend stores the row.
+  above a configured sensitivity level are never cached. The cache
+  guarantees that every read returns exactly what the backing store
+  would return. Caching only changes speed, never correctness.
+- `HashingRowStore` wraps a `RowStore` and computes a content hash on
+  every write to a table marked hashable. It then reports the write up
+  a parent chain, so a Merkle-style integrity tree can stay current
+  without a full rescan.
+- `RowCrypto` and its write and read seam functions apply per-row
+  AES-GCM encryption to a table's `content` column. This runs whenever
+  an estate is configured for row-level encryption, independent of
+  whichever backend stores the row.
 - `ErasureLedger` and `ErasureOverlay` implement right-to-be-forgotten
-  deletion: the ledger records that a piece of content was erased, and the
-  overlay nulls that content out of every read afterward, failing closed
-  (dropping the row) if the erasure check itself cannot be completed.
-- `SnapshotRegistry` and `GCPin` let a kit take a named, attested snapshot
-  of the estate's state and pin the oldest live snapshot's timestamp so a
-  later garbage-collection pass never deletes data a snapshot still needs.
-- `PersistenceKitReplication` copies an entire estate's rows, audit events,
-  and blobs from one `Storage` to another, either as a one-shot full
-  snapshot or as an incremental sync driven by a live change-observation
-  session.
+  deletion. The ledger records that a piece of content was erased. The
+  overlay nulls that content out of every read afterward. It fails
+  closed, dropping the row, if the erasure check itself cannot
+  complete.
+- `SnapshotRegistry` and `GCPin` let a kit take a named, attested
+  snapshot of the estate's state. They also pin the oldest live
+  snapshot's timestamp, so a later garbage-collection pass never
+  deletes data a snapshot still needs.
+- `PersistenceKitReplication` copies an entire estate's rows, audit
+  events, and blobs from one `Storage` to another. It can run this
+  copy as a one-shot full snapshot or as an incremental sync driven by
+  a live change-observation session.
 
 ## How the Pieces Fit
 
-Figure 1 shows the library's topology — its major parts and how a write or
-a read moves between them.
+Figure 1 shows the library's topology. It shows the major parts and
+how a write or a read moves between them.
 
 ![Figure 1. Topology of PersistenceKit](topology.svg)
 
-*Figure 1. Topology of PersistenceKit. A calling kit reaches storage only
-through the four core protocols. Decorators wrap a backend's `RowStore`
-transparently. Cross-cutting concerns (encryption, erasure, snapshots) sit
-beside the core surface and are invoked by name, not by inheritance.
-Replication reads one `Storage` and writes another. Dashed regions mark
-backend-owned engines and the cross-process encryption key store.*
+*Figure 1. Topology of PersistenceKit. A calling kit reaches storage
+only through the four core protocols. Decorators wrap a backend's
+`RowStore` transparently. Cross-cutting concerns sit beside the core
+surface. Examples include encryption, erasure, and snapshots. Each is
+invoked by name, not by inheritance. Replication reads one `Storage` and writes
+another. Dashed regions mark backend-owned engines and the
+cross-process encryption key store.*
 
-A typical write enters through a kit-held reference to `any RowStore`. If
-the estate has caching enabled, that reference is really a
-`CachingRowStore` wrapping the real backend's row store; if hash-on-write
-is configured, a `HashingRowStore` may sit in front of that. The write
-descends through zero or more decorators until it reaches the concrete
-backend — `SQLiteRowStore`, `PostgreSQLRowStore`, or `InMemoryRowStore` —
-which applies the row-encryption seam (a no-op unless the estate uses row
-encryption), checks the content/keyID invariant, validates every SQL
-identifier it is about to interpolate, and commits the row. Every backend
-notifies its `StorageObserver` afterward, so decorators, cache
-invalidators, and replication sessions downstream can react.
+A typical write enters through a kit-held reference to `any RowStore`.
+If the estate has caching enabled, that reference is really a
+`CachingRowStore` wrapping the real backend's row store. If hash-on-write
+is also configured, a `HashingRowStore` may sit in front of that. The
+write descends through zero or more decorators until it reaches the
+concrete backend: `SQLiteRowStore`, `PostgreSQLRowStore`, or
+`InMemoryRowStore`. That backend applies the row-encryption seam, a
+no-op unless the estate uses row encryption. It checks the
+content-and-keyID invariant. It validates every SQL identifier it is
+about to interpolate. It then commits the row. Every backend notifies
+its `StorageObserver` afterward. Decorators, cache invalidators, and
+replication sessions downstream can then react.
 
-A typical read is the same path in reverse, with one addition: any content
-subject to the right-to-be-forgotten contract passes through
-`ErasureOverlay.apply(...)` after the backend query returns, so an erased
-row's content columns come back `nil` even though its skeleton (its ID,
-timestamps, and lattice anchors) survives for referential integrity.
+A typical read follows the same path in reverse, with one addition.
+Any content subject to the right-to-be-forgotten contract passes
+through `ErasureOverlay.apply(...)` after the backend query returns. An
+erased row's content columns then come back `nil`. The row's skeleton
+still survives for referential integrity. The skeleton is its ID,
+timestamps, and lattice anchors.
 
-Encryption, erasure, and snapshots are not separate storage engines. They
-are pure functions and small actors that any backend calls at the right
-moment — `encryptedForWrite`/`decryptedForRead` around a write or a read,
-`ErasureLedgerOps.isErased` inside the overlay, `GCPin.minimumRetainableHlc`
-before a vacuum. This design keeps the cross-cutting logic in one place
-(`PersistenceKit` core) instead of duplicating it inside every backend, and
-it is why the SQLite and PostgreSQL backends produce byte-compatible
-encrypted envelopes: they call the same `RowCrypto` code.
+Encryption, erasure, and snapshots are not separate storage engines.
+They are pure functions and small actors that any backend calls at the
+right moment. `encryptedForWrite` and `decryptedForRead` run around a
+write or a read. `ErasureLedgerOps.isErased` runs inside the overlay.
+`GCPin.minimumRetainableHlc` runs before a vacuum. This design keeps
+the cross-cutting logic in one place, the `PersistenceKit` core,
+instead of duplicating it inside every backend. It is also why the
+SQLite and PostgreSQL backends produce byte-compatible encrypted
+envelopes. Both call the same `RowCrypto` code.
 
 ## What Ships in the Package
 
-The package ships five Swift targets. `PersistenceKit` is the core: the
-`Storage`/`RowStore`/`BlobStore`/`AuditLog`/`StorageObserver` protocols, the
-typed value and predicate algebra, schema declarations, the caching and
-hashing decorators, and the encryption, erasure, snapshot, and telemetry
-toolkits. `PersistenceKitInMemory` is the test backend. `PersistenceKitSQLite`
-is the on-device backend, built against a vendored `SQLCipher` C target so
-whole-database encryption never depends on the host OS's system SQLite.
-`PersistenceKitPostgreSQL` is the server backend, built on `postgres-nio` and
-`NIOSSL`. `PersistenceKitReplication` is the estate-copying primitive,
-depending only on the core protocol surface so it works against any pair of
-conforming backends.
+The package ships five Swift targets. `PersistenceKit` is the core. It
+holds the `Storage`, `RowStore`, `BlobStore`, `AuditLog`, and
+`StorageObserver` protocols. It holds the typed value and predicate
+algebra, the schema declarations, and the caching and hashing
+decorators. It also holds the encryption, erasure, snapshot, and
+telemetry toolkits. `PersistenceKitInMemory` is the test backend.
+`PersistenceKitSQLite` is the on-device backend, built against a
+vendored `SQLCipher` C target. Whole-database encryption never depends
+on the host operating system's own SQLite because of this.
+`PersistenceKitPostgreSQL` is the server backend, built on `postgres-nio`
+and `NIOSSL`. `PersistenceKitReplication` is the estate-copying
+primitive. It depends only on the core protocol surface, so it works
+against any pair of conforming backends.
 
-The package also ships a Rust port in `rust/`, mirroring the same trait
-surface, the same closed predicate algebra, and the same three backends,
-for use outside the Swift/Apple ecosystem. The two ports share design intent
-but are not conformance-gated against each other the way LatticeLib's two
-legs are: PersistenceKit's cross-platform contract is the shared protocol
-shape and wire format, not byte-identical output from a shared corpus.
+The package also ships a Rust port in `rust/`. That port mirrors the
+same trait surface. It mirrors the same closed predicate algebra. It
+mirrors the same three backends. It exists for use outside the Swift
+and Apple ecosystem. The two ports share design intent. They are not
+conformance-gated against each
+other the way LatticeLib's two legs are. PersistenceKit's cross-platform
+contract is the shared protocol shape and wire format. It is not a
+promise of byte-identical output from a shared corpus.

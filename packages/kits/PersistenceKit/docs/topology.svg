@@ -99,12 +99,12 @@ sources:
   <rect class="region" x="600" y="260" width="290" height="70"/>
   <text class="regionlabel" x="610" y="276">Apple-only key custody</text>
   <rect class="ext" x="615" y="285" width="260" height="35" rx="6"/>
-  <text class="label" x="745" y="307" text-anchor="middle">KeychainKeyStore — per-estate 256-bit key</text>
+  <text class="label" x="745" y="307" text-anchor="middle">KeychainKeyStore: per-estate 256-bit key</text>
   <line class="cross" x1="665" y1="222" x2="700" y2="283"/>
 
   <!-- Cross-cutting toolkits region -->
   <rect class="region" x="20" y="260" width="540" height="120"/>
-  <text class="regionlabel" x="30" y="278">Cross-cutting toolkits — called by name, not by inheritance</text>
+  <text class="regionlabel" x="30" y="278">Cross-cutting toolkits: called by name, not by inheritance</text>
 
   <rect class="box" x="40" y="295" width="150" height="60" rx="6"/>
   <text class="label" x="115" y="317" text-anchor="middle">RowCrypto</text>
@@ -129,7 +129,7 @@ sources:
 
   <!-- Replication region -->
   <rect class="region" x="20" y="420" width="870" height="220"/>
-  <text class="regionlabel" x="30" y="438">PersistenceKitReplication — operates on any two Storage instances</text>
+  <text class="regionlabel" x="30" y="438">PersistenceKitReplication: operates on any two Storage instances</text>
 
   <rect class="ext" x="60" y="470" width="150" height="50" rx="6"/>
   <text class="label" x="135" y="490" text-anchor="middle">Source estate</text>
@@ -155,7 +155,7 @@ sources:
   <line class="flow" x1="470" y1="578" x2="558" y2="500"/>
 
   <text class="sub" x="740" y="560">Both paths read the source, then write the</text>
-  <text class="sub" x="740" y="574">destination inside one serializable transaction —</text>
+  <text class="sub" x="740" y="574">destination inside one serializable transaction:</text>
   <text class="sub" x="740" y="588">a crash mid-flush leaves the destination unchanged.</text>
 
   <!-- Backends feed replication -->

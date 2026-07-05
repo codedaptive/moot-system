@@ -110,13 +110,13 @@ sources:
   <text class="sub" x="470" y="393" text-anchor="middle">tmp/ → new/ → cur/ → done/</text>
 
   <rect class="region" x="620" y="330" width="260" height="90"/>
-  <text class="regionlabel" x="630" y="348">External kit boundary — PersistenceKit</text>
+  <text class="regionlabel" x="630" y="348">External kit boundary: PersistenceKit</text>
   <rect class="art" x="650" y="360" width="200" height="42" rx="6"/>
   <text class="label" x="750" y="378" text-anchor="middle">queue.sqlite</text>
   <text class="sub" x="750" y="393" text-anchor="middle">queuekit_jobs table</text>
 
   <rect class="region" x="360" y="440" width="260" height="90"/>
-  <text class="regionlabel" x="370" y="458">External kit boundary — IntellectusLib</text>
+  <text class="regionlabel" x="370" y="458">External kit boundary: IntellectusLib</text>
   <rect class="art" x="400" y="470" width="180" height="42" rx="6"/>
   <text class="label" x="490" y="488" text-anchor="middle">Telemetry sink</text>
   <text class="sub" x="490" y="503" text-anchor="middle">off by default, ~1 ns gate</text>

@@ -109,1253 +109,1315 @@ sources:
     blob: 76499ffb70d979f0d13e8cf9e32bc38ff28ffdb5
 ---
 
-# PersistenceKit Details
+# `PersistenceKit` Details
 
 This document walks through every source file in the package. Read
-`OVERVIEW.md` first for the big picture. Files appear grouped by target,
-in the order a reader should learn them: the core protocols and value
-types first, then the decorators and cross-cutting toolkits built on top
-of them, then the three backends that implement the core protocols, and
-finally the replication module that operates across two backends.
+`OVERVIEW.md` first for the big picture. Files appear grouped by
+target, in the order a reader should learn them. The core protocols
+and value types come first. The decorators and cross-cutting toolkits
+built on top of them come next. The three backends that implement the
+core protocols come after that. The replication module, which runs
+across two backends, comes last.
 
-## Target: PersistenceKit (core)
+## Target: `PersistenceKit` (core)
 
 ### Storage.swift
 
-This file provides the `Storage` protocol — the single entry point every
-backend implements. A term of art first: a protocol in Swift is a contract
-that a type promises to fulfill; any type that conforms to `Storage` can
-be used anywhere `Storage` is expected, regardless of what physical
-engine backs it.
+This file provides the `Storage` protocol, the single entry point
+every backend implements. A term of art first. A protocol in Swift is
+a contract that a type promises to fulfill. Any type that conforms to
+`Storage` can be used anywhere `Storage` is expected. This holds
+regardless of what physical engine backs it.
 
-`Storage` bundles four sub-stores — `rowStore`, `blobStore`, `auditLog`,
-`observer` — plus five life-cycle functions: `open(schema:)` creates files
-or connections and brings the backend up to its declared schema version;
-`close()` shuts it down cleanly and must be safe to call more than once;
-`transaction(isolation:_:)` runs a block of work atomically, rolling back
-every change if the block throws; and the two `currentSchemaVersion`
-overloads report how far a backend's schema has migrated, either
-globally or for one named kit. `migrate(to:)` advances the schema forward.
-A protocol extension supplies a default isolation level of read-committed,
-so most callers can write `storage.transaction { ... }` without naming a
-level at all.
+`Storage` bundles four sub-stores: `rowStore`, `blobStore`, `auditLog`,
+and `observer`. It also bundles five life-cycle functions.
+`open(schema:)` creates files or connections. It also brings the
+backend up to its declared schema version. `close()` shuts the backend
+down cleanly. It must be safe to call more than once.
+`transaction(isolation:_:)` runs a block of work as one step. It rolls
+back every change if the block throws. The two `currentSchemaVersion`
+overloads report how far a backend's schema has migrated. One reports
+globally; the other reports for one named kit. `migrate(to:)` advances
+the schema forward. A protocol extension supplies a default isolation
+level of read-committed. Most callers can therefore write
+`storage.transaction { ... }` without naming a level at all.
 
 ### RowStore.swift
 
-This file provides the typed row input/output protocol, plus three small
-supporting types: `RowKey` (a type alias for `UUID`), `StorageRow` (an
-immutable, subscriptable wrapper around a `[String: TypedValue]` row), and
-`RowHandle` (a `(table, key)` pair that identifies exactly one row).
+This file provides the typed row input and output protocol. It also
+provides three small supporting types. `RowKey` is a type alias for
+`UUID`. `StorageRow` is a fixed, subscriptable wrapper around a
+`[String: TypedValue]` row. `RowHandle` is a `(table, key)` pair that
+identifies exactly one row.
 
-`RowStore` declares the operations every backend must support: `insert`,
-`upsert`, `update`, `delete`, `query`, and `count`. Two further query
-variants matter for performance and safety. `query(...columns:)` is the
-column-projecting form: passing a specific list of column names means a
-column such as a large text blob is never transferred out of storage at
-all, which matters when a caller only needs a handful of small columns
-from a wide table. `querySkipCorrupt(...)` is the resilience form: rather
-than aborting an entire corpus scan the moment one row's stored value
-fails to parse, it skips that row, counts it, and returns everything
-else — the file's documentation is explicit that this method exists for
-best-effort scans (like "every drawer in the estate"), never for a
-single-row point lookup, where a corrupt value should always be a loud
-error.
+`RowStore` declares the operations every backend must support:
+`insert`, `upsert`, `update`, `delete`, `query`, and `count`. Two
+further query variants matter for performance and safety.
+`query(...columns:)` is the column-projecting form. A caller passes a
+specific list of column names. A column such as a large text blob is
+then never transferred out of storage at all. This matters when a
+caller only needs a handful of small columns from a wide table.
+`querySkipCorrupt(...)` is the resilience form. Rather than aborting an
+entire corpus scan the moment one row's stored value fails to parse,
+it skips that row. It counts the skipped row and returns everything
+else. The file's own comment is explicit about this method's
+purpose. It exists for best-effort scans, such as scanning every
+drawer in the estate. It should never be used for a single-row point
+lookup, where a corrupt value should always be a loud error.
 
 A protocol extension supplies default implementations for all of the
-above (falling back to the plain, unprojected `query`), plus a family of
-as-of temporal query overloads. As-of querying means asking what a row
-looked like at a past point in time, identified by an `AsOfCoordinate`
-(a type defined in the `SubstrateTypes` dependency). The default
-implementation of the as-of overloads answers `.present` queries normally
-and throws `StorageError.featureGated` for any `.asOf(hlc)` request — the
-feature is deliberately turned off until two other in-flight pieces of
-work (lineage-wide expunge and the erasure overlay) both ship, because
-turning it on early could let an as-of read resurface content that was
-supposed to have been erased. Finally, this file declares the write-
-transaction boundary — `beginTransaction`, `commitTransaction`,
-`rollbackTransaction` — as protocol requirements rather than
-protocol-extension defaults. This distinction matters for a subtle
-Swift reason: a protocol requirement dispatches to the concrete type even
-when called through an `any RowStore` existential, while a
-protocol-extension default does not always do so reliably. Because
-`CachingRowStore` must forward these calls to whatever it wraps, they
-have to be true requirements.
+above. Each one falls back to the plain, full `query`. The
+extension also supplies a family of as-of temporal query overloads.
+As-of querying means asking what a row looked like at a past point in
+time. That point is identified by an `AsOfCoordinate`, a type defined
+in the `SubstrateTypes` dependency. The default implementation answers
+`.present` queries normally. It throws `StorageError.featureGated` for
+any `.asOf(hlc)` request. The feature stays off on purpose until two
+other in-flight pieces of work both ship: lineage-wide expunge and the
+erasure overlay. Turning it on early could let an as-of read resurface
+content that was supposed to have been erased.
+
+Finally, this file declares the write-transaction boundary as protocol
+requirements rather than protocol-extension defaults. These
+requirements are `beginTransaction`, `commitTransaction`, and
+`rollbackTransaction`. This distinction matters for a subtle Swift
+reason. A protocol requirement dispatches to the concrete type even
+when called through an `any RowStore` existential. A protocol-extension
+default does not always do so reliably. `CachingRowStore` must forward
+these calls to whatever it wraps. They have to be true requirements
+for that forwarding to work.
 
 ### BlobStore.swift
 
-This file provides the blob input/output protocol: `put`, `get`,
+This file provides the blob input and output protocol: `put`, `get`,
 `delete`, `exists`, `size`, and `listKeys`. A blob is a chunk of raw
-bytes identified by an arbitrary string key — typically a
-content-addressed hash or a row's UUID combined with a column name.
-`listKeys()` exists specifically so the replication primitive can
-enumerate every blob in a backend for a full-snapshot copy; because
-key order is unspecified and may differ between backends and even
-between calls, any caller that needs a stable order (replication does)
-sorts the returned keys itself.
+bytes identified by any string key. That key is often a
+content-addressed hash. It can also be a row's UUID combined with a
+column name. `listKeys()` exists in particular so the replication
+primitive can list every blob in a backend for a full-snapshot
+copy. Key order is unspecified and may differ between backends and
+even between calls. Any caller that needs a stable order, and
+replication does, sorts the returned keys itself.
 
 ### AuditLog.swift
 
 This file provides the append-only history protocol. An audit log
-records every change made to a row, in order, and never edits or removes
-a past entry. `append` and `appendBatch` are both idempotent on the
-compound key `(eventID, hlc)` — HLC stands for Hybrid Logical Clock, a
-timestamp format that orders events consistently even across multiple
-devices without perfectly synchronized clocks — so replaying the same
-event twice (which can happen during sync) never creates a duplicate.
+records every change made to a row, in order. It never edits or
+removes a past entry. `append` and `appendBatch` are both idempotent on
+the compound key `(eventID, hlc)`. HLC stands for Hybrid Logical Clock,
+a timestamp format that orders events the same way every time across multiple
+devices without perfectly matched up clocks. Replaying the same
+event twice, which can happen during sync, never creates a duplicate.
 `iterate(after:rowID:limit:)` walks the log in HLC order and accepts a
-resume cursor, and `eventsForRow(_:)` returns just one row's history for
-building a point-in-time projection of that row. PersistenceKit's role
-stops at durable, ordered storage of these events; enforcing the
-conflict-resolution rules of a CRDT (a data structure designed so
-concurrent edits always merge the same way) belongs to a higher kit.
+resume cursor. `eventsForRow(_:)` returns just one row's history. A
+caller uses this to build a point-in-time projection of that row.
+`PersistenceKit`'s role stops at durable, ordered storage of these
+events. Enforcing the conflict-resolution rules of a CRDT belongs to a
+higher kit. A CRDT is a data structure designed so concurrent edits
+always merge the same way.
 
 ### StorageObserver.swift
 
-This file provides the live change-notification protocol, plus four
-supporting event types. `StorageEvent` is the three kinds of row change
-(`insert`, `update`, `delete`); `TableChange` bundles one such event with
-its table, row key, values, and HLC. `BlobEvent` and `BlobChange` are the
-blob-store analogues — a `put` event carries the written bytes so a
-subscriber (specifically, the incremental replication session) can avoid
-a second round-trip just to re-read what was written. `DirtyChainEvent`
-is a third, more specialized notification: when a row in a table marked
-hashable is written, the write also carries the row's new content hash
-and its two nearest ancestors in a Merkle-style containment hierarchy —
-the minimum information a downstream consumer needs to incrementally
-recompute an integrity tree without rescanning it from scratch.
+This file provides the live change-notification protocol. It also
+provides four supporting event types. `StorageEvent` is the three
+kinds of row change: `insert`, `update`, and `delete`. `TableChange`
+bundles one such event with its table, row key, values, and HLC.
+`BlobEvent` and `BlobChange` are the blob-store matches. A `put`
+event carries the written bytes. A subscriber, in particular the
+incremental replication session, can then avoid a second round-trip
+just to re-read what was written. `DirtyChainEvent` is a third, more
+special notification. When a row in a table marked hashable is
+written, the write also carries the row's new content hash. It carries
+the row's two nearest ancestors in a Merkle-style containment
+hierarchy. A downstream consumer needs only this to recompute an
+integrity tree bit by bit. It never has to rescan the tree from
+scratch.
 
-`StorageObserver` itself declares three subscription methods —
-`observe(table:events:)`, `observeBlobs()`, `observeDirtyChain()` — each
-returning an `AsyncStream`, a Swift type for values that arrive over time.
-Delivery is documented as at-least-once, and ordering is preserved within
-one subscription but not promised across different tables. A protocol
-extension supplies a default no-op stream for `observeDirtyChain()` so
-older observer implementations, written before hash-on-write existed,
-keep compiling without modification.
+`StorageObserver` itself declares three subscription methods:
+`observe(table:events:)`, `observeBlobs()`, and `observeDirtyChain()`.
+Each one returns an `AsyncStream`, a Swift type for values that arrive
+over time. Delivery is documented as at-least-once. Ordering is
+preserved within one subscription but not promised across different
+tables. A protocol extension supplies a default no-op stream for
+`observeDirtyChain()`. Older observer implementations, written before
+hash-on-write existed, keep compiling without a change because of
+this.
 
 ### StorageIntrospection.swift
 
 This file provides an optional, separate capability protocol for
-reporting backend health, plus the `StorageStats` value type that carries
-the numbers. `StorageIntrospection` is deliberately not merged into
-`Storage` itself — it is a distinct protocol so that adding it never
-breaks an existing conformer, and a caller checks for the capability with
-`storage as? StorageIntrospection` rather than assuming every backend has it.
+reporting backend health. It also provides the `StorageStats` value
+type that carries the numbers. `StorageIntrospection` is on purpose
+not merged into `Storage` itself. It is a distinct protocol so that
+adding it never breaks an existing conformer. A caller checks for the
+capability with `storage as? StorageIntrospection` rather than
+assuming every backend has it.
 
 `StorageStats` holds a superset of fields that no single backend fully
-populates: page-level statistics such as `pageSize` and `walFrameCount`
-are SQLite-only; buffer cache and transaction counters such as
-`cacheHitRatio` and `deadlockCount` are PostgreSQL-only; `rowCount` and
-`blobCount` are InMemory-only. A backend that cannot supply a given field
-sets it to `nil` rather than fabricating a zero, so a caller can tell "not
-measured" apart from "measured as zero." The file's doc comment includes a
-field-by-field table cross-referencing exactly which backend fills which
-field — the authoritative reference for anyone adding a new statistic.
+fills. Page-level statistics such as `pageSize` and
+`walFrameCount` are SQLite-only. Buffer cache and transaction counters
+such as `cacheHitRatio` and `deadlockCount` are PostgreSQL-only.
+`rowCount` and `blobCount` are InMemory-only. A backend that cannot
+supply a given field sets it to `nil` rather than fabricating a zero.
+A caller can then tell "not measured" apart from "measured as zero."
+The file's doc comment includes a field-by-field table. That table
+cross-references exactly which backend fills which field. It is the
+trusted reference for anyone adding a new statistic.
 
 ### Transaction.swift
 
 This file provides the transaction protocol and the three isolation
 levels a caller may request: `readCommitted`, `repeatableRead`, and
 `serializable`. `StorageTransaction` exposes the same three sub-stores
-`Storage` does (`rowStore`, `blobStore`, `auditLog`) so that code written
-inside a transaction block looks exactly like code written outside one —
-the only difference is that every operation inside the block either all
-commits together or all rolls back together. The file's own comment notes
-that nested transactions and savepoints are out of scope for this version
-of the design.
+`Storage` does: `rowStore`, `blobStore`, and `auditLog`. Code written
+inside a transaction block therefore looks exactly like code written
+outside one. The only difference is that every operation inside the
+block either all commits together or all rolls back together. The
+file's own comment notes that nested transactions and savepoints are
+out of scope for this version of the design.
 
 ### StorageError.swift
 
-This file provides the single closed error type every PersistenceKit
-operation can throw. Being a closed `enum` (as opposed to an open
-protocol) means every possible failure is enumerated in one place, so a
-caller's `switch` over a `StorageError` can be exhaustive. The cases cover
-backend availability, schema and migration failures, constraint and
-uniqueness violations, connection-pool exhaustion, transaction conflicts,
-type mismatches, and three especially important safety cases:
-`corruptStoredValue` (a stored value could not be parsed back to its
-declared type — thrown instead of silently substituting a fabricated
-default, because a fabricated UUID or an epoch-zero date would be a
-quiet data-identity lie), `invalidConfiguration` (an `EstateConfiguration`
-requests something impossible on the current platform, such as an
-Apple-only tagger on a non-Apple host), and `invalidIdentifier` (a
-caller-supplied SQL column or table name contains characters outside the
-safe set, which is the guard that keeps a dynamically-built query from
-becoming a SQL-injection vector even though the name is already
-double-quoted).
+This file provides the single closed error type every `PersistenceKit`
+operation can throw. Being a closed `enum`, as opposed to an open
+protocol, means every possible failure is listed in one place. A
+caller's `switch` over a `StorageError` can therefore be exhaustive.
+The cases cover backend availability, schema and migration failures,
+and constraint and uniqueness violations. They also cover
+connection-pool exhaustion, transaction conflicts, and type mismatches.
+Three cases matter most for safety. `corruptStoredValue` fires when a
+stored value could not be parsed back to its declared type. It is
+thrown instead of silently using a fabricated default instead. This is because
+a fabricated UUID or an epoch-zero date would be a quiet
+data-identity lie. `invalidConfiguration` fires when an
+`EstateConfiguration` requests something impossible on the current
+platform, such as an Apple-only tagger on a non-Apple host.
+`invalidIdentifier` fires when a caller-supplied SQL column or table
+name contains characters outside the safe set. This is the guard that keeps a query built at run time from becoming
+a SQL-injection vector. It matters even though the name is already
+double-quoted.
 
 ### Column.swift
 
-This file provides `Column`, a `(table, name)` pair used throughout the
-predicate and schema types to reference one column, and `ColumnType`, the
-closed set of value kinds a column can hold: `uuid`, `bitmap`, `text`,
-`timestamp`, `float`, `int`, `bool`, `blob`, `json`, `hlc`, and
-`fingerprint`. `Column` conforms to `Comparable` (ordered first by table,
-then by name) purely so test fixtures and other code that sorts columns
-gets a stable, repeatable order.
+This file provides `Column`, a `(table, name)` pair used throughout
+the predicate and schema types to reference one column. It also
+provides `ColumnType`. This is the closed set of value kinds a column
+can hold. The kinds are `uuid`, `bitmap`, `text`, `timestamp`, `float`,
+`int`, `bool`, `blob`, `json`, `hlc`, and `fingerprint`. `Column`
+conforms to `Comparable`, ordered first by table and then by name.
+This exists purely so test fixtures and other code that sorts columns
+gets a stable, steady order.
 
 ### TypedValue.swift
 
 This file provides `TypedValue`, the tagged union that carries every
-value crossing the PersistenceKit boundary — the wire format of the whole
-library. Every backend pattern-matches on the case and emits its own
-native representation: SQLite might store a `.uuid` as a `TEXT` column,
-PostgreSQL might store it as a native `UUID` column, but callers on both
-sides always see the same Swift enum. The case set is deliberately
-closed; the file's own comment says adding a new case is expected to
-require updating every backend, and that this cost is the right price to
-pay for true backend portability — a new value kind can never partially
-work on only some backends. Two of the twelve cases, `.hlc` and
-`.fingerprint`, exist specifically because PersistenceKit is forbidden
-from reimplementing substrate math: the `HLC` and `Fingerprint256` types
-themselves come from the `SubstrateTypes` dependency, and PersistenceKit
-only needs a slot to carry them.
+value crossing the `PersistenceKit` boundary. It is the wire format of
+the whole library. Every backend pattern-matches on the case and emits
+its own native representation. SQLite might store a `.uuid` as a
+`TEXT` column. PostgreSQL might store it as a native `UUID` column.
+Callers on both sides always see the same Swift enum. The case set is
+on purpose closed. The file's own comment says adding a new case is
+expected to require updating every backend. Paying this cost is worth it. It means a value works the same way
+on every backend. A new value kind can never partially work on only
+some backends. Two of the twelve cases, `.hlc`
+and `.fingerprint`, exist for a specific reason. `PersistenceKit` is
+forbidden from building again substrate math. The `HLC` and
+`Fingerprint256` types themselves come from the `SubstrateTypes`
+dependency. `PersistenceKit` only needs a slot to carry them.
 
 ### Predicate.swift
 
 This file provides `StoragePredicate`, the closed query-condition tree
-every backend compiles to its own query language, plus `OrderClause` and
-`OrderDirection` for sorting. The predicate cases fall into three
-families: logical (`and`, `or`, `not`, `isTrue`, `isFalse`), comparison
-(`eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `isNull`, `isNotNull`, `in`,
-`like`), and bitmap (`bitmaskAll`, `bitmaskAny`, `bitmaskNone`,
-`bitwiseEq`, all restricted to integer-family columns). PersistenceKit
-treats a predicate as opaque data except when compiling it — no backend
-ever needs to special-case another backend's query shape, because the
-tree is the same tree everywhere.
+every backend compiles to its own query language. It also provides
+`OrderClause` and `OrderDirection` for sorting. The predicate cases
+fall into three families. The logical family covers `and`, `or`,
+`not`, `isTrue`, and `isFalse`. The comparison family covers `eq`,
+`neq`, `lt`, `lte`, `gt`, `gte`, `isNull`, `isNotNull`, `in`, and
+`like`. The bitmap family covers `bitmaskAll`, `bitmaskAny`,
+`bitmaskNone`, and `bitwiseEq`. All four apply only to integer-family
+columns. `PersistenceKit` treats a predicate as opaque data except when
+compiling it. No backend ever needs to special-case another backend's
+query shape. The tree is the same tree everywhere, so there is nothing
+to special-case.
 
-The two static helpers `all(_:)` and `any(_:)` build an `and`/`or` tree
-from a list of predicates with useful short-circuiting: an empty list of
-conditions to AND together collapses to `isTrue` (an always-true filter,
-because "no restrictions" should match everything), an empty list to OR
-together collapses to `isFalse`, and a list already containing a
-contradictory trivial case (`isFalse` inside an `all`, `isTrue` inside an
-`any`) collapses the whole expression immediately rather than building a
+The two static helpers `all(_:)` and `any(_:)` build an `and`/`or`
+tree from a list of predicates. Both include useful short-circuiting.
+An empty list of conditions to AND together collapses to `isTrue`, an
+always-true filter, because "no restrictions" should match everything.
+An empty list to OR together collapses to `isFalse`. A list that
+already contains a conflicting trivial case collapses the whole
+expression right away. This happens when `isFalse` sits inside an
+`all`, or when `isTrue` sits inside an `any`, rather than building a
 needlessly large tree.
 
 ### GeneratedColumn.swift
 
-This file provides first-class computed columns: a column whose value is
-derived from other columns in the same row by a small, structured integer
-expression, rather than stored directly by a caller. `GeneratedColumn`
-names the column, its result type, and its `GeneratedExpression`.
-`GeneratedExpression` is a closed, recursive enum covering exactly the
-bit-field algebra a bitmap-heavy schema needs: reading another column
-(`.column`), a constant (`.literal`), bitwise AND/OR/XOR, left and right
-shift by a fixed amount, and equality/inequality tests that evaluate to 1
-or 0. The file's own comment explains why this is a structured expression
-tree and not a raw SQL string: a SQL string generated column would push
-backend-specific syntax into a schema declaration, and the in-memory
-backend has no SQL engine to evaluate it against. A structured expression
-has exactly one meaning, so SQLite and PostgreSQL render it to native
-`GENERATED ALWAYS AS (...) STORED` DDL and the in-memory backend evaluates
-it directly — three faithful realizations of one description, with no
-escape hatch for one backend to interpret it differently from another.
+This file provides first-class computed columns. A computed column
+holds a value derived from other columns in the same row. A small,
+structured integer expression performs that derivation, rather than a
+caller storing the value directly. `GeneratedColumn` names the column,
+its result type, and its `GeneratedExpression`. `GeneratedExpression`
+is a closed, recursive enum. It covers exactly the bit-field algebra a
+bitmap-heavy schema needs: reading another column (`.column`), a
+constant (`.literal`). Three cases cover bitwise AND, OR, and XOR.
+Two more cases cover a left shift and a right shift by a fixed amount.
+A final pair of cases test equality and inequality, each one giving
+back one or zero. The file's own comment explains why this is a structured
+expression tree rather than a raw SQL string. A SQL string generated
+column would push backend-specific syntax into a schema declaration.
+The in-memory backend also has no SQL engine to evaluate it against. A
+structured expression has exactly one meaning. SQLite and PostgreSQL
+render it to native `GENERATED ALWAYS AS (...) STORED` DDL. The
+in-memory backend works out it directly. These are three faithful
+versions of one description. No backend gets an escape hatch to
+interpret it differently from another.
 
-`renderSQL()` turns an expression into a SQL fragment shared by SQLite and
-PostgreSQL, because both use the same bitwise-operator syntax and
-double-quoted identifiers; the one exception is bitwise XOR, which SQLite
-lacks as an operator, so both backends instead render it as the
-algebraically equivalent `(a | b) - (a & b)`. `evaluate(_:)` computes the
-same result directly against an in-memory row dictionary, for the
+`renderSQL()` turns an expression into a SQL fragment shared by SQLite
+and PostgreSQL. Both use the same bitwise-operator syntax and
+double-quoted identifiers. The one exception is bitwise XOR, which
+SQLite lacks as an operator. Both backends instead render it as `(a | b) - (a & b)`, which gives
+the same value using only AND and OR. `evaluate(_:)` computes
+the same result directly against an in-memory row dictionary, for the
 in-memory backend. `integerValue(_:)` extracts an `Int64` from any
-integer-family `TypedValue` (an `.int`, `.bitmap`, `.bool`, or `.hlc`),
-returning zero for anything else or for an absent column, which is the
-in-memory evaluator's sentinel for "no meaningful value here."
+integer-family `TypedValue`: an `.int`, `.bitmap`, `.bool`, or `.hlc`.
+It returns zero for anything else or for an absent column. That zero
+is the in-memory evaluator's sentinel for "no meaningful value here."
 
 ### EstateConfiguration.swift
 
 This file provides `EstateConfiguration`, the one value that fully
-describes how to open one estate's storage, and `BackendConfiguration`,
-the closed choice of physical engine (`sqlite`, `postgresql`, `inMemory`)
-with its connection parameters. `EstateConfiguration` also carries the
-estate's encryption mode, cache configuration, and novel-token tagger
-choice, each defaulted so that existing code that does not mention these
-newer fields keeps compiling and keeps behaving exactly as it did before
-they existed — a plaintext, uncached, HMM-tagged estate is what a caller
-gets by simply not asking for anything else.
+describes how to open one estate's storage. It also provides
+`BackendConfiguration`. This is the closed choice of physical engine:
+`sqlite`, `postgresql`, or `inMemory`. It also carries that engine's
+connection settings. `EstateConfiguration` itself carries the estate's
+encryption mode, its cache setup, and its novel-token tagger choice.
+Each of these has a default. Existing code that never mentions these
+newer fields keeps compiling and keeps behaving exactly as it did
+before they existed. A caller who asks for nothing else gets a
+plaintext, uncached, HMM-tagged estate.
 
-`queueSibling(filename:)` is a more specialized function: it derives a
-second `EstateConfiguration` pointing at a companion database file that
-sits beside the estate's own file — used, for example, so a work-queue
-kit gets its own small database without needing separate key
-distribution or a separate configuration path. For a SQLite estate at
-`<dir>/<uuid>.sqlite`, asking for the sibling `"queue.sqlite"` produces
-`<dir>/<uuid>.queue.sqlite` — the estate's own file stem is folded into
-the sibling name so two different estates in the same directory can never
-collide. For an in-memory estate, the sibling is also in-memory (both
-ephemeral, which is the correct pairing for tests). For a PostgreSQL
-estate, the function throws `StorageError.featureGated`: the design
-deliberately defers a PostgreSQL queue sibling until later, and it fails
-loudly rather than silently returning a half-working configuration.
+`queueSibling(filename:)` is a more special function. It derives a
+second `EstateConfiguration` that points at a companion database file
+sitting beside the estate's own file. A work-queue kit, for example,
+gets its own small database this way. It needs no separate key
+distribution and no separate configuration path. Take a SQLite estate
+at `<dir>/<uuid>.sqlite`. Asking for the sibling `"queue.sqlite"`
+produces `<dir>/<uuid>.queue.sqlite`. The estate's own file stem is
+folded into the sibling name. Two different estates in the same
+directory can therefore never collide. For an in-memory estate, the
+sibling is also in-memory. Both are ephemeral, which is the correct
+pairing for tests. For a PostgreSQL estate, the function throws
+`StorageError.featureGated`. The design puts off a PostgreSQL queue
+sibling on purpose until later. It fails loudly rather than quietly
+returning a half-working configuration.
 
-The private helper `deriveQueueSiblingID(parentID:filename:)` computes the
-sibling's estate ID deterministically — by XOR-folding the filename's
-UTF-8 bytes into a 16-byte tag and then XOR-ing that tag with the parent
-UUID's raw bytes — so the same parent estate and the same filename always
-produce the same sibling ID, with no call to `UUID()` anywhere on this
-path. Determinism here matters because every process that opens the same
-estate must agree on the same sibling ID without any coordination.
+The private helper `deriveQueueSiblingID(parentID:filename:)` computes
+the sibling's estate ID in a fixed way. It XOR-folds the filename's
+UTF-8 bytes into a sixteen-byte tag. It then XORs that tag with the
+parent UUID's raw bytes. The same parent estate and the same filename
+therefore always produce the same sibling ID. No call to `UUID()`
+happens anywhere on this path. This fixed behavior matters. Every
+process that opens the same estate must agree on the same sibling ID
+without talking to any other process.
 
 ### EstateCacheConfig.swift
 
-This file provides `EstateCacheConfig`, the small value type that turns
-row caching on or off for one estate and bounds how much a cache is
-allowed to hold and how sensitive the content it holds may be.
-`ceilingBytes` is clamped to be non-negative at construction, and
-`sensitivityThreshold` is clamped to at most 2 — because sensitivity level
-3, "Secret" in the ARIA adjective scale this kit shares with the rest of
-the system, must never be cached under any configuration, and clamping at
-construction enforces that invariant without relying on every caller to
-remember the numeric boundary. `EstateCacheConfig.disabled` is the
-zero-change default: an estate that never mentions caching gets exactly
-the pre-caching behavior.
+This file provides `EstateCacheConfig`, the small value type that
+turns row caching on or off for one estate. It also bounds how much a
+cache is allowed to hold. It bounds how sensitive the content it holds
+may be. `ceilingBytes` is clamped to be non-negative at construction.
+`sensitivityThreshold` is clamped to at most two. Sensitivity level
+three is called "Secret" in the ARIA adjective scale this kit shares
+with the rest of the system. Secret content must never be cached, no
+matter how the estate is set up. Clamping at construction enforces
+that rule. No caller needs to remember the numeric boundary on its
+own. `EstateCacheConfig.disabled` is the zero-change default. An estate
+that never mentions caching gets exactly the pre-caching behavior.
 
 ### EncryptionMode.swift
 
-This file provides the three at-rest encryption modes and the
-configuration value that carries one of them per estate.
-`EncryptionMode.plaintext` stores content verbatim — encryption, if any,
+This file provides the three at-rest encryption modes. It also
+provides the configuration value that carries one of them per estate.
+`EncryptionMode.plaintext` stores content as-is. Encryption, if any,
 happens only at a sharing boundary elsewhere in the system.
-`.rowEncryption` (Mode 2) encrypts one column's content per row under a
-key the row's own `keyID` column names. `.fullDatabase` (Mode 3) encrypts
-the entire SQLite file, schema included, via SQLCipher's `PRAGMA key` at
-the connection layer, which makes the per-row seam a no-op for that mode
-because the whole file is already ciphertext on disk. A fourth mode,
-database-plus-threshold encryption for a FedRAMP-tier deployment, is
-deliberately absent from this enum — the file's comment stresses that the
-capability does not exist in this build at all, so adding it later is a
-conscious, reviewed act rather than an accidental unlock.
+`.rowEncryption`, Mode 2, encrypts one column's content per row under a
+key named by the row's own `keyID` column. `.fullDatabase` is Mode 3.
+It encrypts the entire SQLite file, including its schema, through
+SQLCipher's `PRAGMA key` at the connection layer. This makes the per-row seam a
+no-op for that mode. The whole file is already ciphertext on disk, so
+there is nothing left for the per-row seam to do. A fourth mode is on
+purpose left out of this enum: database-plus-threshold encryption for
+a FedRAMP-tier deployment. The file's comment stresses that this build
+does not have that capability at all. Adding it later is a conscious,
+reviewed act, not an accident.
 
 `EstateEncryptionConfig` bundles the mode with a key identifier and the
 actual `SymmetricKey`. Its stored `key` property is `package`-scoped
-rather than `public`: the SQLite backend, in a sibling module of the same
-Swift package, needs it, but nothing outside the package should ever see
-it. The convenience initializer `init(_ mode:)` mints a fresh, full-entropy
-256-bit key and a UUID key identifier for either encrypting mode, and
-mints neither for plaintext. `usesRowCrypto` is `true` only for Mode 2 —
-Mode 3 protects everything at the file level, so the per-row seam has
-nothing to do there. `fullDatabaseKeyHex` renders the whole-file key as
-lowercase hex for the SQLCipher `PRAGMA key` statement and is documented
-as something that must never be logged.
+rather than `public`. The SQLite backend, in a sibling module of the
+same Swift package, needs it. Nothing outside the package should ever
+see it. The convenience initializer `init(_ mode:)` mints a fresh,
+full-entropy 256-bit key and a UUID key identifier for either
+encrypting mode. It mints neither for plaintext. `usesRowCrypto` is
+`true` only for Mode 2. Mode 3 protects everything at the file level,
+so the per-row seam has nothing to do there. `fullDatabaseKeyHex`
+renders the whole-file key as lowercase hex for the SQLCipher `PRAGMA
+key` statement. It is documented as something that must never be
+logged.
 
 ### RowCrypto.swift
 
 This file provides the per-row AES-GCM-256 encryption used by
-`EncryptionMode.rowEncryption`, plus the three write/read seam functions
-that every backend calls at the same two moments: just before a write and
-just after a read. Living in `PersistenceKit` core rather than in one
-backend module is the point: both `PersistenceKitSQLite` and
-`PersistenceKitPostgreSQL` call the exact same code, so the two backends
-produce byte-compatible ciphertext envelopes without either one knowing
-about the other.
+`EncryptionMode.rowEncryption`. It also provides the three write and
+read seam functions every backend calls at the same two moments: just
+before a write, and just after a read. Living in `PersistenceKit` core
+rather than in one backend module is the point. Both
+`PersistenceKitSQLite` and `PersistenceKitPostgreSQL` call the exact
+same code. The two backends therefore produce byte-compatible
+ciphertext envelopes without either one knowing about the other.
 
-`AeadProvider` is a small protocol seam — AEAD stands for Authenticated
-Encryption with Associated Data, a class of algorithm that both encrypts
-data and proves it was not tampered with. Any type conforming to
-`AeadProvider` can replace the default algorithm without touching any
-call site; the file names this as the extension point a future
-FIPS-validated provider would use. `CryptoKitAeadProvider` is the default
-implementation, backed by Apple's CryptoKit. It generates a fresh random
-96-bit nonce on every single encrypt call — reusing a nonce under the same
-key is the one mistake that breaks AES-GCM's security guarantee — and
-returns the three parts concatenated as `[12-byte nonce][16-byte
-tag][ciphertext]`, so a later decrypt is self-contained from the stored
-bytes alone with nothing else to look up.
+`AeadProvider` is a small protocol seam. AEAD stands for Authenticated
+Encryption with Associated Data. This is a class of algorithm that
+both encrypts data and proves no one changed it. Any type that
+conforms to `AeadProvider` can swap in for the default algorithm
+without touching any call site. The file names this as the point
+where a future FIPS-checked provider would plug in.
+`CryptoKitAeadProvider` is the default version, backed by Apple's
+CryptoKit. It makes a fresh random ninety-six-bit nonce on every
+single encrypt call. Reusing a nonce under the same key is the one
+mistake that breaks AES-GCM's whole guarantee. It returns the three
+parts joined as `[12-byte nonce][16-byte tag][ciphertext]`. A later
+decrypt is self-contained from the stored bytes alone. It has nothing
+else to look up.
 
-`encryptedForWrite(_:config:provider:)` is the write-side seam: for an
-estate using row encryption, it encrypts the row's `content` column and
-stamps a `keyID` column recording which key sealed it; for any other mode,
-or for a row with no `content` column, it returns the values unchanged.
-`decryptedForRead(_:config:provider:)` reverses this on read, but only
-when the row's stored `keyID` matches the estate's own key identifier — a
-mismatched `keyID` means the row was sealed under a key this estate does
-not hold, so the function passes the row through as still-ciphertext
-rather than attempting a decrypt that would only fail as an authentication
-error. `assertContentKeyIDInvariant(_:table:config:)` is a final structural
-guard: on an encrypting estate, any content-bearing row reaching a backend
-write path with `.text` content and no `keyID` means the encryption seam
-did not run somewhere upstream, and the function throws rather than let
-that plaintext be persisted where a later read could never recover it.
+`encryptedForWrite(_:config:provider:)` is the write-side seam. For an
+estate using row encryption, it encrypts the row's `content` column. It
+stamps a `keyID` column recording which key sealed it. For any other
+mode, or for a row with no `content` column, it returns the values
+unchanged. `decryptedForRead(_:config:provider:)` reverses this on
+read, but only when the row's stored `keyID` matches the estate's own
+key identifier. A mismatched `keyID` means the row was sealed under a
+key this estate does not hold. The function passes the row through as
+still-ciphertext rather than trying a decrypt that would only fail as
+an authentication error. `assertContentKeyIDInvariant(_:table:config:)`
+is a final structural guard. On an encrypting estate, any
+content-bearing row that reaches a backend write path with `.text`
+content and no `keyID` means the encryption seam did not run somewhere
+upstream. The function throws rather than let that plaintext be stored
+where a later read could never recover it.
 
 ### CachingRowStore.swift
 
 This file provides `CachingRowStore`, a decorator that wraps any
-`RowStore` and serves an in-memory hot tier of recently-read rows,
-transparently — the file's own comment states the guarantee plainly:
-every operation returns results identical to what the unwrapped backing
-store would have returned, and the cache changes only latency, never
-correctness.
+`RowStore` and serves an in-memory hot tier of recently-read rows. The
+caller never has to know this layer is there. The file's own comment
+states the guarantee plainly. Every operation returns results the same
+as what the unwrapped backing store would have returned. The cache
+changes only latency, never correctness.
 
-The cache key is not just `(table, row key)`; it is that pair combined
+The cache key is not just `(table, row key)`. It is that pair combined
 with an `AsOfCoordinate`. A `.present` (current-state) read and an
-`.asOf(hlc)` (past-state) read of the same row are cached as two entirely
-separate entries, because a snapshot read against a pinned, immutable
-past state can be cached forever — the GC pin mechanism guarantees that
-data will not be vacuumed out from under it — while a present-state read
-must be evicted the instant the row changes. `insert`, `upsert`,
-`update`, and `delete` all evict the affected present-state entry (or, for
-a batch predicate that does not identify one specific row, evict every
-present-state entry for that table) after the underlying write succeeds.
-An optional `parentChainProvider` closure, supplied by the calling kit,
-lets a write also evict cached Merkle-aggregate entries for that row's
-ancestors, so a cached rollup value never goes stale just because one leaf
-changed underneath it.
+`.asOf(hlc)` (past-state) read of the same row are cached as two
+entirely separate entries. A snapshot read against a pinned, fixed
+past state can be cached forever. The GC pin mechanism guarantees that
+data will not be swept away out from under it. A present-state read,
+by contrast, must be dropped the instant the row changes. Four write
+methods drop the affected present-state entry after the underlying
+write succeeds: `insert`, `upsert`, `update`, and `delete`. For a
+batch predicate that does not name one specific row, these same four
+drop every present-state entry for that table instead. An optional `parentChainProvider` closure,
+supplied by the calling kit, lets a write also drop cached Merkle-
+aggregate entries for that row's ancestors. A cached rollup value never
+goes stale just because one leaf changed underneath it.
 
-Admission to the cache is sensitivity-gated. `isAdmissible(_:)` reads a
-row's `provenance` bitmap column (when present) and decodes a six-bit
-sensitivity field at bits 30–35, mapping the scale-gapped raw values 0,
-16, 32, and 48 to the ordinals Normal, Elevated, Restricted, and Secret.
-Secret content is rejected unconditionally, and anything above the
-configured `sensitivityThreshold` is rejected too. An unrecognized bit
-pattern, or a `provenance` value of the wrong `TypedValue` case, is also
-rejected — the comments call this failing closed, meaning that any doubt
-about a row's sensitivity keeps it out of the cache rather than risking
-that sensitive content sits unencrypted in process memory longer than it
-should. Eviction, when the estimated byte total exceeds the configured
-ceiling, removes the least-recently-used entry first, tracked by a
-monotonically increasing access counter rather than by wall-clock time.
+Admission to the cache is gated by sensitivity. `isAdmissible(_:)` reads
+a row's `provenance` bitmap column, when present, and decodes a
+six-bit sensitivity field at bits thirty through thirty-five. It maps the scale-gapped raw values zero, sixteen, thirty-two, and
+forty-eight to four ordinals. The ordinals are Normal, Elevated,
+Restricted, and Secret, in that order. Secret content is turned away
+without exception. Anything above the
+configured `sensitivityThreshold` is turned away too. An unrecognized
+bit pattern, or a `provenance` value of the wrong `TypedValue` case, is
+also turned away. The comments call this failing closed. Any doubt
+about a row's sensitivity keeps it out of the cache, rather than
+risking that sensitive content sits unencrypted in process memory
+longer than it should. Eviction removes the least-recently-used entry first, whenever the
+estimated byte total goes over the ceiling the estate sets. A counter
+that only ever rises tracks recent use. The cache does not track
+wall-clock time at all.
 
-All of this mutable state — the entry dictionary, the access counter, the
-running byte total — lives inside a private `actor`, `CacheActor`. Because
-every stored property of the actor is itself `Sendable`, wrapping the
-state in an actor is what lets the outer `CachingRowStore` class, a
-`final class` with no locks of its own, safely conform to `Sendable` under
-Swift 6's strict concurrency checking.
+All of this changeable state lives inside a private `actor`,
+`CacheActor`. The state is the entry dictionary, the access counter,
+and the running byte total. Every stored property of the actor is
+itself `Sendable`. Wrapping the state in an actor is what lets the
+outer `CachingRowStore` class safely conform to `Sendable` under Swift
+6's strict concurrency checking. `CachingRowStore` itself is a `final
+class` with no locks of its own.
 
 ### CacheInvalidator.swift
 
 This file provides `CacheInvalidator`, the bridge between a
 `StorageObserver`'s live change stream and a `CachingRowStore`'s
-invalidation method — needed for the case where some other writer
-bypasses the specific `CachingRowStore` instance entirely (for example,
-a second process, or a raw connection opened for a migration) and
-mutates the backing store directly. Without this bridge, the cache would
-serve stale data forever after such a write, because it would never learn
+invalidation method. This bridge is needed for the case where some
+other writer bypasses the specific `CachingRowStore` instance
+entirely. That writer might be a second process, or a raw connection
+opened for a migration. Without this bridge, the cache would serve
+stale data forever after such a write, because it would never learn
 the write happened.
 
-One `CacheInvalidator` manages every table it is told to watch through a
-single detached background task that fans out one child task per table,
-using Swift's structured-concurrency `withTaskGroup`. `cancel()` cancels
-the whole tree at once, and `deinit` calls `cancel()` automatically so a
-caller who simply lets the invalidator go out of scope does not leak a
-background task. The initializer's documentation is careful to flag one
-narrow race: subscriptions start inside the background task, so a write
-issued in the same instant as `init()` could in principle race ahead of
-subscription registration; a caller with strict-ordering requirements is
-advised to yield briefly (for example with `Task.sleep`) before relying on
-the very first write being observed.
+One `CacheInvalidator` watches every table it is told to watch through
+a single detached background task. That task fans out one child task
+per table, using Swift's structured-concurrency `withTaskGroup`.
+`cancel()` cancels the whole tree at once. `deinit` calls `cancel()` on
+its own. A caller who simply lets the invalidator go out of scope does
+not leak a background task. The comment on `init(cache:observer:tables:)`
+flags one narrow race. Subscriptions start inside the background task.
+A write issued in the same instant as `init()` could in theory race
+ahead of that subscription. A caller with strict-ordering needs should
+yield briefly, for example with `Task.sleep`, before trusting that the
+very first write was seen.
 
 ### HashingRowStore.swift
 
-This file provides `HashingRowStore`, a decorator that intercepts writes
-to any table marked hashable in the schema, computes a content hash for
-the row, and emits a `DirtyChainEvent` so an integrity tree elsewhere in
-the system can be kept current incrementally rather than rebuilt from
-scratch on every write. PersistenceKit deliberately does not import a
-hashing library itself; the actual hash function arrives as an injected
-`ContentHashProvider` closure supplied by the calling kit (which does
-import the hashing library), so this package stays free of that
-dependency while still owning the mechanism that wires hashing into every
-write path.
+This file provides `HashingRowStore`, a decorator that intercepts
+writes to any table marked hashable in the schema. It computes a
+content hash for the row. It emits a `DirtyChainEvent`, so an
+integrity tree elsewhere in the system can stay current bit by bit,
+rather than being rebuilt from scratch on every write.
+`PersistenceKit` on purpose does not import a hashing library itself.
+The actual hash function arrives as an injected `ContentHashProvider`
+closure supplied by the calling kit, which does import the hashing
+library. This package stays free of that dependency while still owning
+the mechanism that wires hashing into every write path.
 
 The trickiest part of this file is keeping the hash correct on partial
-writes. An `insert` always carries the row's full column set, so hashing
-the incoming `values` directly is correct. An `update`, however, typically
-carries only the columns being changed — hashing just that partial
-dictionary would produce a hash for a row that never actually existed in
-storage. `augmentWithHashForKnownKey(table:rowKey:mergedValues:)` solves
-this by pre-reading the row's current, full state, merging the incoming
-changes on top of it, and hashing that merged result — the same approach
-`upsert` uses when it resolves to an update against an existing row rather
-than a fresh insert. Before hashing, the function strips any existing
-`content_hash` column from the input, so the insert path and the
-update-via-merge path always hash the same set of data columns and never
-diverge just because one of them happened to already carry a stale hash
-value.
+writes. An `insert` always carries the row's full column set, so
+hashing the incoming `values` directly is correct. An `update`,
+however, often carries only the columns being changed. Hashing just
+that partial dictionary would produce a hash for a row that never
+actually existed in storage.
+`augmentWithHashForKnownKey(table:rowKey:mergedValues:)` solves this by
+pre-reading the row's current, full state. It merges the incoming
+changes on top of it. It then hashes that merged result. `upsert` uses
+this same approach when it resolves to an update against an existing
+row rather than a fresh insert. Before hashing, the function strips
+any existing `content_hash` column from the input. The insert path and
+the update-via-merge path therefore always hash the same set of data
+columns. Neither one ever drifts apart just because it happened to
+already carry a stale hash value.
 
 `emitDirtyChain(table:rowKey:hashResult:)` delivers the resulting
-`DirtyChainEvent` to an injected `ObserverRegistryRef` closure, which is
-`nil` for backends without observer support — the hash is still computed
-and stored, but the notification step is simply skipped.
+`DirtyChainEvent` to an injected `ObserverRegistryRef` closure, which
+is `nil` for backends without observer support. The hash is still
+computed and stored either way. The notification step is simply
+skipped when there is no closure to call.
 
 ### ErasureLedger.swift
 
 This file provides the append-only record of what has been erased,
 without ever storing the erased content itself. A "drawer," in this
-context, is one unit of stored content (the term comes from the estate's
-own filing metaphor, not from this package). `ErasureLedgerEntry` pairs a
-`drawerId` with the `HLC` at which it was erased. The `erasure_ledger`
-table this module declares is marked append-only in its
-`TableDeclaration` — every backend enforces this at the storage layer, so
-even a caller that somehow bypasses the ledger's own API cannot mutate or
-remove an entry once written, which is exactly the tamper-evidence
-property an erasure record needs.
+context, is one unit of stored content. The term comes from the
+estate's own filing metaphor, not from this package.
+`ErasureLedgerEntry` pairs a `drawerId` with the `HLC` at which it was
+erased. The `erasure_ledger` table this module declares is marked
+append-only in its `TableDeclaration`. Every backend enforces this at
+the storage layer. Even a caller that somehow bypasses the ledger's
+own API cannot change or remove an entry once it is written. This is
+exactly the tamper-evidence property an erasure record needs.
 
-`recordErasure(rowStore:drawerId:erasedHlc:)` inserts one entry and
-throws `StorageError.duplicateKey` if that drawer was already erased —
-each drawer is erased exactly once. `isErased(rowStore:drawerId:)` is the
-fast point-lookup used on every read that might need to hide erased
-content; `lookupErasure(rowStore:drawerId:)` returns the full entry when a
-caller needs the erasure timestamp itself, not just a yes/no answer.
+`recordErasure(rowStore:drawerId:erasedHlc:)` inserts one entry. It
+throws `StorageError.duplicateKey` if that drawer was already erased,
+because each drawer is erased exactly once.
+`isErased(rowStore:drawerId:)` is the fast point-lookup used on every
+read that might need to hide erased content.
+`lookupErasure(rowStore:drawerId:)` returns the full entry when a
+caller needs the erasure time itself, not just a yes-or-no answer.
 
 ### ErasureOverlay.swift
 
-This file provides the two-phase, fail-closed filter that actually hides
-erased content from a query result, built on top of the ledger this
-module does not itself define. `ErasureOverlayConfig` is supplied by a
-higher kit and carries two pieces of entity-specific knowledge
-PersistenceKit does not have on its own: `extractErasureId`, a closure
-that pulls the erasure-ledger key out of a result row (or returns `nil`
-for a row type that is not subject to erasure at all), and
-`contentColumns`, the list of column names to null out when a row turns
-out to be erased.
+This file provides the two-phase, fail-closed filter that actually
+hides erased content from a query result. It builds on top of the
+ledger, though this module does not itself define that ledger.
+`ErasureOverlayConfig` is supplied by a higher kit. It carries two
+pieces of entity-specific knowledge `PersistenceKit` does not have on
+its own. `extractErasureId` is a closure that pulls the erasure-ledger
+key out of a result row, or returns `nil` for a row type not subject
+to erasure at all. `contentColumns` is the list of column names to
+null out when a row turns out to be erased.
 
-`ErasureOverlay.apply(rows:config:rowStore:)` runs the two phases the file
-describes at the top: phase one is an ordinary query that already
-happened before this function is called; phase two walks the returned
-rows one at a time, checks each one's erasure ID against the ledger, and
-nulls its content columns if erased. The important design decision is
-what happens when the ledger check itself throws an error instead of
-returning a clean yes-or-no answer: the row is dropped from the result
-entirely. This is the fail-closed half of "two-phase fail-closed" — an
-uncertain answer about whether a row was erased is treated the same as
-"it was," because showing content that should have been erased is a worse
-failure than temporarily hiding content that was not.
+`ErasureOverlay.apply(rows:config:rowStore:)` runs the two phases the
+file describes at the top. Phase one is a plain query that
+already ran before this function was called. Phase two walks the
+returned rows one at a time. It checks each row's erasure ID against
+the ledger. It nulls that row's content columns if the row was
+erased. The important design choice is what happens when the ledger
+check itself throws an error, instead of giving a clean yes-or-no
+answer. The row is dropped from the result. This is the
+fail-closed half of "two-phase fail-closed." An uncertain answer about
+whether a row was erased is treated the same as "it was." Showing
+content that should have been erased is a worse failure than
+temporarily hiding content that was not.
 
 ### GCPin.swift
 
-This file provides the query that tells a garbage-collection pass which
-rows it must not touch yet. GC, short for garbage collection, is any
-maintenance pass that reclaims space by deleting rows that are no longer
-needed — for example, old versions of a row that a new version has
-superseded. The problem this file solves: a snapshot taken earlier (via
-`SnapshotRegistry`) might still need to read an "old" row that the GC pass
-would otherwise consider safe to delete.
+This file provides the query that tells a garbage-collection pass
+which rows it must not touch yet. GC, short for garbage collection, is
+any maintenance pass that reclaims space by deleting rows no longer
+needed. An old version of a row that a newer version has replaced is
+one example. The problem this file solves is simple to state. A
+snapshot taken earlier, through `SnapshotRegistry`, might still need to
+read an "old" row that a GC pass would otherwise think it safe to
+delete.
 
 `GCPin.minimumRetainableHlc(rowStore:)` answers this by finding the
-smallest HLC across every currently-registered snapshot — the oldest live
-snapshot's timestamp is the pin. Any row whose HLC is at or after that
-pin must survive a GC pass; anything strictly older is safe to reclaim.
-When no snapshots exist at all, the function returns `nil`, meaning
-nothing is pinned and every row is fair game for GC. `isPinned(rowStore:
-rowHlc:)` is the convenience per-row check built on top of the same query.
+smallest HLC across every currently-registered snapshot. The oldest
+live snapshot's time stamp is the pin. Any row whose HLC sits at or
+after that pin must survive a GC pass. Anything strictly older is safe
+to reclaim. When no snapshots exist at all, the function returns
+`nil`. Nothing is pinned in that case, and every row is fair game for
+GC. `isPinned(rowStore:rowHlc:)` is the convenience per-row check built
+on top of the same query.
 
 ### SnapshotRegistry.swift
 
-This file provides the durable record of named point-in-time snapshots
-and the cryptographic attestations that accompany them. A snapshot, in
-this design, is not a copy of any data — it is a registry row recording
-one HLC (the moment the snapshot was taken) plus one or more attestation
-rows recording what a Merkle root looked like at that moment for a given
-subject. PersistenceKit itself knows nothing about what a "subject" is —
-the `subjectKind` and `subjectId` strings are supplied by whichever
+This file provides the durable record of named point-in-time
+snapshots. It also provides the signed proofs that go with them. A
+snapshot, in this design, is not a copy of any data. It is a registry
+row recording one HLC, the moment the snapshot was taken. It also adds
+one or more proof rows. Each proof row records what a Merkle root
+looked like at that moment for a given subject. `PersistenceKit` itself knows nothing about what a "subject"
+is. The `subjectKind` and `subjectId` strings are supplied by whichever
 higher-level kit is taking the snapshot.
 
-`SnapshotId` is a UUID-backed opaque identifier, minted fresh by
-`SnapshotId.mint()`. `SnapshotRegistryOps.createSnapshot(rowStore:hlc:
-label:createdAt:attestations:)` mints an ID, inserts one registry row, and
-inserts one attestation row per subject passed in, returning the
-completed `SnapshotRecord` to the caller. `listSnapshots(rowStore:)` walks
-every registered snapshot in HLC order; `deleteSnapshot(rowStore:
-snapshotId:)` removes a snapshot's attestation rows before removing its
-registry row (child rows first, so no orphaned attestation can ever
-reference a deleted registry entry) and reports whether anything existed
-to delete. `attestations(rowStore:snapshotId:)` reads back every
-attestation for one snapshot, ordered by subject for deterministic
-output. The remaining private helpers handle the mechanical work of
-turning a `StorageRow` into a typed `SnapshotRecord` or
-`SnapshotAttestation` and back.
+`SnapshotId` is a UUID-backed opaque ID, minted fresh by
+`SnapshotId.mint()`.
+`SnapshotRegistryOps.createSnapshot(rowStore:hlc:label:createdAt:attestations:)`
+mints an ID, inserts one registry row, and inserts one proof row per
+subject passed in. It returns the finished `SnapshotRecord` to the
+caller. `listSnapshots(rowStore:)` walks every registered snapshot in
+HLC order. `deleteSnapshot(rowStore:snapshotId:)` removes a snapshot's
+proof rows before removing its registry row, child rows first, so no
+orphaned proof can ever point at a deleted registry entry. It reports
+whether anything existed to delete. `attestations(rowStore:snapshotId:)`
+reads back every proof for one snapshot, ordered by subject for a
+steady result. The remaining private helpers handle the mechanical
+work. They turn a `StorageRow` into a typed `SnapshotRecord` or
+`SnapshotAttestation`, and back again.
 
 ### NoOpObserver.swift
 
-This file provides `NoOpObserver`, a trivial `StorageObserver`
-conformance whose three subscription methods each return a stream that
-finishes immediately, delivering nothing. It exists as a placeholder for
-any backend or test path that has no real change-notification mechanism
-yet but still needs to satisfy the `Storage` protocol's requirement for
-an `observer` property — the PostgreSQL backend, for instance, uses this
-type directly rather than implementing a live PostgreSQL notification
+This file provides `NoOpObserver`, a plain `StorageObserver` that
+satisfies the protocol without doing any real work. Its three
+subscription methods each return a stream that finishes right away,
+delivering nothing. It exists as a stand-in for any backend or test
+path that has no real change-notification mechanism yet. That backend
+still needs to satisfy the `Storage` protocol's requirement for an
+`observer` property. The PostgreSQL backend, for instance, uses this
+type directly. It does not implement a live PostgreSQL notification
 channel.
 
 ### NovelTokenTaggerChoice.swift
 
 This file provides the estate-creation-time choice of which tagger
-classifies a "novel token" — a word not found in a language model's
-existing vocabulary — when an estate needs to do that classification work
-somewhere in its processing pipeline. The two cases are `.hmm`, a
-deterministic Hidden Markov Model tagger that produces the exact same
-output on every platform and is therefore safe to use across a federation
-of devices, and `.nlTagger`, Apple's `NaturalLanguage` framework tagger,
-which can be more accurate on Apple hardware but is not available outside
-Apple platforms and is not guaranteed to produce the same output across
-different OS versions.
+classifies a "novel token." A novel token is a word not found in a
+language model's own word list. An estate needs to sort words like
+this somewhere in its processing pipeline. The two
+cases are `.hmm` and `.nlTagger`. `.hmm` is a fixed Hidden Markov Model
+tagger. It produces the exact same output on every platform, so it is
+safe to use across a group of devices sharing memory. `.nlTagger` is
+Apple's `NaturalLanguage` framework tagger. It can be more accurate on
+Apple hardware. It does not work outside Apple platforms. It also does not always produce the same output across different
+OS versions.
 
-This choice is fixed permanently at estate creation in this version of
-the design; changing it later, with re-tagging of existing content, is
-explicitly deferred to a future version. The file's extensive comments
-spell out the practical consequence: an estate created with `.nlTagger`
-cannot safely federate (share and compare memories) with an
-`.hmm`-tagged estate without re-tagging all of its content first, because
-the two taggers can disagree on the same word. Enforcing that constraint
-automatically is also deferred; for now, a caller who selects `.nlTagger`
-is responsible for not mixing that estate into a federation with
-incompatible estates. `NovelTokenTaggerChoice.default` is `.hmm` — the
-safe, federation-compatible baseline every estate gets unless a caller
-explicitly opts into the Apple-only alternative. An identically-named,
-independently-defined enum exists in `LatticeLib`, in a different package;
-the two packages deliberately do not share this type by importing one
-from the other, so that neither package depends on the other.
+This choice is fixed forever at estate creation in this version of the
+design. Changing it later, with re-tagging of existing content, is on
+purpose put off to a future version. The file's long comments spell
+out the practical result. An estate created with `.nlTagger` cannot
+safely federate with an `.hmm`-tagged estate without re-tagging all of
+its content first. Federating means sharing and comparing memories
+across estates. The two taggers can disagree on the same word. No
+code enforces that rule on its own yet. A caller who picks
+`.nlTagger` must keep that estate out of any federation with a
+mismatched estate. `NovelTokenTaggerChoice.default` is `.hmm`. This is
+the safe, federation-friendly baseline every estate gets, unless a
+caller on purpose picks the Apple-only choice instead. An enum with
+the same name exists in `LatticeLib`, a different package, defined on
+its own. The two packages on purpose do not share this one type. Not
+one imports it from the other, so neither package depends on the
+other.
 
 ### PersistenceKitTelemetry.swift
 
-This file provides `reportStorageStats(_:estateID:now:)`, the function
-that turns a `StorageIntrospection.stats(now:)` snapshot into a stream of
-named metrics through `IntellectusLib`, a lightweight, zero-dependency
-telemetry library. The function's entire behavior is gated on
-`Intellectus.isEnabled`, which defaults to `false`. When telemetry is
-disabled — the default for essentially every deployment — the function
-returns after a single atomic boolean load, without ever calling
-`stats(now:)` and without building a single metric object; the file's
-comment quantifies this cost at roughly one nanosecond, making the
-disabled path effectively free.
+This file provides `reportStorageStats(_:estateID:now:)`. This function
+turns a `StorageIntrospection.stats(now:)` snapshot into a stream of
+named metrics through `IntellectusLib`, a light, zero-dependency
+telemetry library. The function's whole behavior is gated on
+`Intellectus.isEnabled`, which defaults to `false`. Telemetry is off
+for nearly every deployment. When it is off, the function returns
+after a single atomic boolean check. It never calls `stats(now:)`. It
+never builds a single metric object. The file's own comment puts this
+cost at roughly one nanosecond. The disabled path is close to free.
 
-When telemetry is enabled, the function emits one metric per non-`nil`
-field of the captured `StorageStats`, each under the `persistence.db.*`
-namespace and each tagged with the emitting kit's name and the estate's
-ID, so a monitoring backend can filter and group by estate. Because
-`StorageStats` fields are `nil` exactly where a backend cannot supply
-them, the emitted metric set naturally differs by backend without this
-function needing to know anything about which backend produced the
-snapshot — an in-memory estate simply never emits a `wal_frames` metric,
-because that field was never populated in the first place. Every
-timestamp passed to `Intellectus.report(_:)` comes from the caller-supplied
-`now` parameter, never from a fresh `Date()` call inside this function,
-which is a deliberate determinism rule followed throughout the whole
-package: any code that might run identically twice must never read the
-wall clock itself.
+When telemetry is on, the function emits one metric per non-`nil`
+field of the captured `StorageStats`. Each metric sits under the
+`persistence.db.*` namespace. Each one is tagged with the emitting
+kit's name and the estate's ID, so a monitoring backend can filter and
+group by estate. `StorageStats` fields are `nil` exactly where a
+backend cannot supply them. The set of emitted metrics differs from
+backend to backend. This function needs to know nothing about which
+backend produced the snapshot. For example, an in-memory estate never
+emits a `wal_frames` metric. That field was simply never filled in.
+Every time stamp passed to `Intellectus.report(_:)`
+comes from the caller-supplied `now` argument. It never comes from a
+fresh `Date()` call inside this function. This is a rule followed
+through the whole package. Any code that might run the same way twice
+must never read the wall clock itself.
 
 ## Target: PersistenceKitInMemory
 
 ### InMemoryStorage.swift
 
-This file provides `InMemoryStorage`, the backend used for tests and for
-any storage that should live only as long as the current process, plus
-the `InMemoryStateActor` that owns every piece of mutable state behind
-Swift's actor isolation. There is no file on disk and no network
-connection; every table is a plain Swift dictionary held in memory.
+This file provides `InMemoryStorage`, the backend used for tests and
+for any storage that should live only as long as the current process.
+It also provides the `InMemoryStateActor` that owns every piece of
+changeable state behind Swift's actor isolation. There is no file on
+disk. There is no network connection. Every table is a plain Swift
+dictionary held in memory.
 
-The most carefully documented piece of this file is how `transaction(
-isolation:_:)` implements rollback. Rather than running the caller's
-block against a private, detached copy of the state and only replacing
-the live state on success, it runs the block directly against the live
-actor state and takes a snapshot copy only for the error path. The file's
-own comment explains why the seemingly simpler "copy, mutate, replace on
-success" approach is actually wrong: if any other write reaches the live
-actor state between the moment the snapshot was taken and the moment a
-successful transaction would replace the whole state with its
-snapshot-derived copy, that concurrent write would be silently erased by
-the replacement. The comment traces this exact bug to a real incident — a
-burst of concurrent inserts racing a transaction lost five to ten percent
-of queued work. Running against live state avoids the problem entirely,
-at the cost of needing an explicit rollback-to-snapshot path when the
-block throws.
+The trickiest part of this file is how
+`transaction(isolation:_:)` implements rollback. It does not run the
+caller's block against a private, separate copy of the state and then
+replace the live state only on success. Instead, it runs the block
+directly against the live actor state. It takes a snapshot copy only
+for the error path. The file's own comment explains why the simpler
+"copy, change, replace on success" approach is wrong. Say
+some other write reaches the live actor state between the moment the
+snapshot was taken and the moment a successful transaction would
+replace the whole state with its snapshot-derived copy. That
+concurrent write would be silently wiped out by that swap. The
+comment traces this exact bug to a real incident. A burst of
+concurrent inserts racing a transaction lost five to ten percent of
+queued work. Running against live state avoids the problem.
+The cost is needing a clear rollback-to-snapshot path when the block
+throws.
 
-Change notifications during a transaction are buffered rather than
-delivered immediately, for a related reason: if a subscriber were notified
-of a write that the transaction later rolled back, it would have observed
-something that, from the estate's point of view, never actually happened.
-`beginNotificationBuffering()` starts collecting notifications instead of
-delivering them; `commitNotifications()` flushes the buffer to observers
-only after the block has returned successfully; the rollback path
-discards the buffer instead. `insertRow`, `upsertRow`, `updateRows`, and
-`deleteRows` are the four mutating operations, each of which computes any
-declared `GeneratedColumn` values via the static
-`materializeGenerated(_:_:)` helper before storing the row, matching what
-SQLite and PostgreSQL compute natively so a query against any backend
-returns the same generated values. `queryRows(...)` applies the predicate
-and ordering against full rows first and only narrows to the requested
-column projection at the very end, so a projected query can still filter
-or sort on a column it does not actually return — matching SQLite's
-`SELECT`-list-versus-`WHERE`/`ORDER BY` semantics exactly.
+Reports of a change during a transaction are held back, rather than
+sent right away, for a related reason. Say a subscriber were told
+about a write that the transaction later rolled back. From the
+estate's point of view, a rolled-back write never took place at all.
+`beginNotificationBuffering()` starts collecting change reports
+instead of sending them. `commitNotifications()` flushes the buffer to
+observers only after the block has returned with success. The
+rollback path throws the buffer away instead. Four operations change
+stored rows: `insertRow`, `upsertRow`, `updateRows`, and `deleteRows`.
+Each one works out any declared `GeneratedColumn`
+values through the static `materializeGenerated(_:_:)` helper before
+storing the row. This matches what SQLite and PostgreSQL compute on
+their own, so a query against any backend returns the same generated
+values. `queryRows(...)` applies the predicate and ordering against
+full rows first. It only narrows to the requested column set at the
+very end. A projected query can still filter or sort on a
+column it does not actually return. This matches SQLite's own
+`SELECT`-list-versus-`WHERE`/`ORDER BY` behavior, in full.
 
-`InMemoryStorage` also conforms to `StorageIntrospection`, reporting an
-approximate byte size (a flat per-row estimate plus exact blob byte
-counts — described in the file as a rough signal, not a precise
-allocator measurement), a live row and blob count, and a monotonically
-increasing rollback counter.
+`InMemoryStorage` also conforms to `StorageIntrospection`. It reports
+a rough byte size, a live row and blob count, and a steadily rising
+rollback counter. The byte size is a flat per-row guess plus exact
+blob byte counts. The file's own comment calls this a rough signal,
+not an exact count of memory used.
 
 ### InMemoryRowStore.swift
 
 This file provides the thin `RowStore` conformance that simply forwards
 every call to the shared `InMemoryStateActor`. Its one piece of design
-worth noting is the column-projection overload: because the in-memory
-backend already holds the full row in memory, projecting away unrequested
-columns saves no actual transfer cost the way it does for SQLite — the
-comment is explicit that the point of implementing it anyway is
-consistency, so a `StorageRow` returned from a projected in-memory query
-is byte-identical in shape to the same projected query against SQLite,
-and code under test cannot accidentally depend on a column being present
-just because the in-memory backend happened to still have it in memory.
+worth noting is the column-projection overload. The in-memory backend
+already holds the full row in memory, so leaving out columns nobody
+asked for saves no real transfer cost, the way it does for SQLite. The
+comment is clear that the point of building it anyway is one of
+matching shape. A `StorageRow` returned from a projected in-memory
+query is shaped just like the same projected query against SQLite.
+Code under test cannot depend on a column being present by mistake,
+just because the in-memory backend happened to still have it in
+memory.
 
 ### InMemoryBlobStore.swift
 
-This file provides the `BlobStore` conformance for the in-memory backend
-— five one-line forwarding methods to the shared state actor's blob
-dictionary. There is nothing backend-specific to explain here beyond what
-`BlobStore.swift` already documents; this file exists purely to satisfy
-the protocol against the actor's storage.
+This file has the `BlobStore` conformance for the in-memory
+backend. It is five one-line forwarding methods to the shared state
+actor's blob dictionary. There is nothing backend-specific to explain
+here beyond what `BlobStore.swift` already covers. This file exists
+purely to satisfy the protocol against the actor's storage.
 
 ### InMemoryAuditLog.swift
 
-This file provides the `AuditLog` conformance for the in-memory backend,
-again a thin forwarding layer to the shared state actor, which itself
-de-duplicates on `(eventID, hlc)` exactly as the protocol's idempotence
-contract requires.
+This file has the `AuditLog` conformance for the in-memory
+backend. It is again a thin forwarding layer to the shared state
+actor. That actor removes duplicates on `(eventID, hlc)`, just as the
+protocol's idempotence contract requires.
 
 ### InMemoryObserver.swift
 
-This file provides `ObserverRegistry`, the subscription bookkeeping
-shared by every in-memory row store, blob store, and audit log instance
-backed by the same state actor, and `InMemoryObserver`, the thin
-`StorageObserver` conformance built on top of it. The registry
-deliberately does not use actor isolation for its subscriber lists;
-instead it uses a plain `NSLock`. The file's comment explains the
-trade-off precisely: registering a subscription must be synchronous, with
-the stream already recording it before `observe()` returns to the caller,
-so that a change notified the very next line of code can never race ahead
-of the subscription being recorded. An `actor`-based registry would force
-`register` to be an `async` function, reopening exactly that race. This
-mirrors the equivalent Rust observer hub, which registers synchronously
-for the same reason.
+This file provides `ObserverRegistry`. This is the subscription
+bookkeeping shared by every in-memory row store, blob store, and
+audit log instance. All three sit behind the same state actor. It also provides
+`InMemoryObserver`, the thin `StorageObserver` conformance built on
+top of it. The registry on purpose does not use actor isolation for
+its subscriber lists. Instead, it uses a plain `NSLock`. The file's
+comment lays out the trade-off in plain terms. Registering a
+subscription must happen right away, with the stream already recording
+it before `observe()` returns to the caller. A change reported the
+very next line of code can then never race ahead of the subscription
+being recorded. An `actor`-based registry would force `register` to be
+an `async` function. That would reopen that same race all over again. This
+mirrors the matching Rust observer hub, which registers right away for
+the same reason.
 
-`notify(_:)` snapshots the list of matching subscribers under the lock
-and then yields to each of them entirely outside the lock, so that a
-subscription's own termination handler — which also needs the lock to
-remove itself from the list — can never deadlock against an in-flight
-notification. Row, blob, and dirty-chain subscriptions are tracked in
-three separate dictionaries but follow the same synchronous-register,
-lock-scoped-snapshot, unlocked-delivery pattern throughout.
+`notify(_:)` takes a snapshot of the list of matching subscribers
+under the lock. It then sends to each of them outside the lock. A
+subscription's own end-of-life handler, which also needs the lock to
+remove itself from the list, can never deadlock against a report
+already in flight. Row, blob, and dirty-chain
+subscriptions are tracked in three separate dictionaries. All three
+follow the same pattern: register right away, snapshot inside the
+lock, and send outside the lock.
 
 ### PredicateEvaluator.swift
 
-This file provides the in-memory interpreter for `StoragePredicate` —
-the only backend that evaluates the predicate tree directly against
-Swift values in memory rather than compiling it to a query string first.
-`PredicateEvaluator.evaluate(_:against:)` walks the tree recursively,
-handling every case from `Predicate.swift` by reading the named column
-out of a `[String: TypedValue]` row (treating a missing column the same
-as an explicit `.null`) and applying the matching comparison, bitmask
-test, or `LIKE`-style text match. `likeMatch(_:pattern:)` translates a
-SQL `LIKE` pattern (`%` for any run of characters, `_` for exactly one)
-into an `NSRegularExpression`, so the in-memory backend matches the same
-patterns SQL's `LIKE` operator would.
+This file has the in-memory reader for `StoragePredicate`. It is
+the only backend that works out the predicate tree directly against
+Swift values in memory, rather than compiling it to a query string
+first. `PredicateEvaluator.evaluate(_:against:)` walks the tree from
+the top down. It handles every case from `Predicate.swift` by reading
+the named column out of a `[String: TypedValue]` row, treating a
+missing column the same as an explicit `.null`. It then applies the
+matching comparison, bitmask test, or `LIKE`-style text match.
+`likeMatch(_:pattern:)` turns a SQL `LIKE` pattern into an
+`NSRegularExpression`. In that pattern, `%` stands for any run of
+characters. `_` stands for just one character. The in-memory backend
+matches the same patterns SQL's `LIKE` operator would.
 
 `TypedValueComparator.compare(_:_:)`, in the same file, is the shared
-ordering function used both by predicate comparisons and by `ORDER BY`
-sorting: `nil` (that is, `.null`) sorts before every other value, and two
-values of the same case compare by their underlying Swift value, with
-`.hlc` compared by its packed integer form (`HLC.packed`, defined at the
-bottom of `InMemoryStorage.swift`) to get a single total order over an
-HLC's three component fields.
+ordering function used both by predicate comparisons and by `ORDER
+BY` sorting. `nil`, that is `.null`, sorts before every other value.
+Two values of the same case compare by their underlying Swift value.
+`.hlc` is compared by its packed integer form instead. That form is
+`HLC.packed`, defined at the bottom of `InMemoryStorage.swift`. Packing
+gives a single total order over an HLC's three parts.
 
 ## Target: PersistenceKitSQLite
 
 ### SQLiteStorage.swift
 
-This file provides `SQLiteStorage`, the `Storage` conformance for the
-on-device backend, and the much larger `SQLiteBackend` actor that does
-essentially all of the real work — schema migration, every row and blob
-operation, audit logging, and health introspection — serialized through
-one actor per estate, matching the file's opening comment that a SQLite
-estate gets exactly one connection, with SQLite's own WAL (write-ahead
-log) mode handling concurrent readers safely underneath.
+This file has `SQLiteStorage`, the `Storage` conformance for the
+on-device backend. It also has the much larger `SQLiteBackend` actor
+that does almost all of the real work. One actor per estate handles it all: schema migration, row-and-blob
+work, audit logging, and health checks. The file's opening comment
+matches this design: a
+SQLite estate gets exactly one connection. SQLite's own WAL, or
+write-ahead log, mode handles concurrent readers safely underneath.
 
-Schema migration walks a schema's declared `Migration` list, running each
-pending migration inside its own `BEGIN IMMEDIATE`/`COMMIT` pair and
-rolling back and throwing `StorageError.migrationFailed` if any operation
-in that migration fails. `applyMigrations(_:)` is written to be safe to
-call even on a completely fresh SQLite file that was never opened through
-`openSchema(_:)` first — a documented real scenario, since at least one
-caller invokes `migrate(to:)` directly — by re-running the idempotent
-table- and migrations-table-creation steps before checking what actually
-needs to migrate.
+Schema migration walks a schema's declared `Migration` list. It runs
+each pending migration inside its own `BEGIN IMMEDIATE`/`COMMIT` pair.
+It rolls back and throws `StorageError.migrationFailed` if any step in
+that migration fails. `applyMigrations(_:)` is written to be safe to
+call even on a brand-new SQLite file, one never opened through
+`openSchema(_:)` first. This is a real case in practice, since at
+least one caller calls `migrate(to:)` directly. It handles this by
+re-running the safe-to-repeat table- and migrations-table-creation
+steps before it checks what actually needs to migrate.
 
-Every row-mutating method — `insertRow`, `upsertRow`, `updateRows`,
-`deleteRows`, `queryRows` — begins by calling `validateSQLIdentifier` on
-every table and column name it is about to interpolate into a SQL string.
-The file's comments tie this directly to a named security fix
-(SECFIX-WS2-PK F9): double-quoting a SQL identifier is not sufficient
-protection if the identifier itself can contain a double-quote character,
-because that character can escape the delimiter and alter the query, so
-every name is checked against a strict allow-list before it is ever
-placed into a SQL string. `insertRow` and `queryRows` are also where the
-at-rest row-encryption seam actually runs: `insertRow` calls
-`encryptedForWrite` before binding values, and `queryRows` calls
-`decryptedForRead` after reading them back, both of which are no-ops on a
-plaintext or whole-database-encrypted estate.
+Five row-changing methods start by calling `validateSQLIdentifier`
+on every table and column name they are about to place into a SQL
+string: `insertRow`, `upsertRow`, `updateRows`, `deleteRows`, and
+`queryRows`. The file's comments tie this directly to a
+named security fix, SECFIX-WS2-PK F9. Double-quoting a SQL name is not enough protection on its own. A name
+might hold a double-quote character. That one character can escape
+the mark and change the query. Every name is checked against a
+strict allow-list before it is ever placed into a SQL string.
+`insertRow` and `queryRows` are also where the at-rest row-encryption
+seam actually runs. `insertRow` calls `encryptedForWrite` before
+binding values. `queryRows` calls `decryptedForRead` after reading
+them back. Both are no-ops on a plaintext or whole-database-encrypted
+estate.
 
 `readColumn(stmt:index:schema:columnName:table:)` is the file's most
-carefully reasoned function: it decides, column by column, whether a raw
-SQLite value should be trusted as-is or treated as corrupt. The
-distinction the comment draws is between a type-tolerant decode (a valid
-value stored under SQLite's flexible column affinity, which is passed
-through as-is) and a genuine parse failure on a column whose declared
-type says it should parse (an unparseable UUID or timestamp string),
-which throws `StorageError.corruptStoredValue` rather than ever
-fabricating a random UUID or an epoch-zero date in its place.
+carefully reasoned function. It decides, column by column, whether a
+raw SQLite value should be trusted as-is or treated as corrupt. The
+comment draws a line between two cases. One is a type-tolerant decode,
+a valid value stored under SQLite's flexible column affinity, which is
+passed through as-is. The other is a genuine parse failure on a
+column whose declared type says it should parse, such as an
+unparseable UUID or time-stamp string. That second case throws
+`StorageError.corruptStoredValue` rather than ever making up a random
+UUID or an epoch-zero date in its place.
 `queryRowsSkipCorrupt(...)` reuses the same column-reading logic but
-catches exactly that error per row, logs it, counts it, and continues to
-the next row — the cursor-level implementation `RowStore`'s protocol
-default can only approximate by discarding an entire query's results.
+catches exactly that error per row. It logs the error, counts the row,
+and moves on to the next one. This cursor-level version can do
+something `RowStore`'s protocol default can only approximate, which is
+to discard an entire query's results.
 
-`storageStats(now:)` implements `StorageIntrospection` for SQLite by
-reading a handful of read-only `PRAGMA` statements (`page_size`,
-`page_count`, `freelist_count`) and deriving the WAL frame count directly
-from the `-wal` sidecar file's size on disk rather than calling `PRAGMA
-wal_checkpoint`, because that particular PRAGMA can fail with a locked
-error if a concurrent operation is in flight, even from inside the same
-serializing actor.
+`storageStats(now:)` gives `StorageIntrospection` for SQLite by
+reading a handful of read-only `PRAGMA` statements: `page_size`,
+`page_count`, and `freelist_count`. It works out the WAL frame count
+straight from the `-wal` side file's size on disk. It does not call
+`PRAGMA wal_checkpoint` for this. That pragma can fail with a locked
+error if some other job is in flight. This can happen even from
+inside the same serializing actor.
 
 ### SQLiteConnection.swift
 
-This file provides `SQLiteConnection`, a thin Swift wrapper around the C
-`sqlite3` API, `SQLiteStatement`, the prepared-statement wrapper used for
-every parameterized query, and `ISO8601`, the shared timestamp
-formatting and parsing utility used everywhere a `.timestamp` `TypedValue`
-crosses the SQLite boundary.
+This file has `SQLiteConnection`, a thin Swift wrapper around the C
+`sqlite3` API. It also has `SQLiteStatement`. This is the
+prepared-statement wrapper used for every parameterized query. A
+third piece, `ISO8601`, is the shared time-stamp formatting and
+parsing tool. It runs everywhere a `.timestamp` `TypedValue` crosses
+the SQLite boundary.
 
-Opening a connection does several things in a specific, safety-relevant
-order. First, it checks whether the target path is a symbolic link and
-refuses to open it if so — the comment names this CAND-052, a defense
-against a pre-planted symlink that could otherwise redirect SQLite's
-writes to an arbitrary file elsewhere on disk, and notes that the check
-uses `lstat` semantics (via `resourceValues(forKeys:)`) so it identifies
+Opening a connection does several things, in a specific order that
+matters for safety. First, it checks whether the target path is a
+symbolic link. It refuses to open the file if so. The comment names
+this CAND-052, a defense against a pre-planted symlink that could
+otherwise send SQLite's writes to some other file on disk. The check
+uses `lstat` behavior, through `resourceValues(forKeys:)`, so it spots
 the symlink itself rather than following it to whatever it points at.
-Second, if the estate uses whole-database encryption, it issues `PRAGMA
-key` with the estate's hex-encoded key before any other statement runs —
-this must be the very first statement, because SQLCipher cannot even read
-the schema on page one of the file without the correct key already
-applied. Third, it applies Apple's file-level Data Protection, a
-best-effort step that layers OS-level at-rest protection on top of
-SQLCipher's own encryption. Finally, it sets the durability pragmas: WAL
-journal mode, `NORMAL` synchronous durability, a WAL auto-checkpoint
-threshold, a busy timeout, and foreign-key enforcement.
+Second, if the estate uses whole-database encryption, it issues
+`PRAGMA key` with the estate's hex-coded key before any other
+statement runs. This must be the very first statement. SQLCipher
+cannot even read the schema on page one of the file without the
+right key already applied. Third, it applies Apple's file-level Data
+Protection, a best-effort step that layers OS-level at-rest
+protection on top of SQLCipher's own encryption. It sets the durability pragmas last: WAL journal mode, `NORMAL`
+synchronous durability, a WAL auto-checkpoint limit, a busy timeout,
+and foreign-key rules.
 
-`ISO8601` deserves its own explanation because two very different
-performance and correctness stories live in it. `string(from:)` first
-clamps an out-of-range `Date` (for example one accidentally derived from
-milliseconds mistaken for seconds) into the range `ISO8601DateFormatter`
-can actually parse back — years 0001 through 9999 — because writing an
-unparseable string like `+59009-...` would silently corrupt any future
-read of that row; a clamp with a logged warning is judged better than a
-value nothing can ever read back correctly. `date(from:)` tries a hand-
-written, allocation-free parser, `fastParseCanonicalUTC(_:)`, before
-falling back to the much slower ICU-backed `ISO8601DateFormatter`. The
-comment explains why the fast path exists at all: a stack-sampling
-profile during a large import showed the formatter's `date(from:)`
-consuming roughly eighty percent of total CPU time, because a Merkle
-rollup re-decodes every row's timestamp on every insert, making the parse
-cost scale quadratically with import size. The fast parser recognizes
-only the exact canonical shape this kit itself writes and returns `nil`
-for anything even slightly different (a numeric time-zone offset,
-lowercase letters, trailing garbage), which sends control back to the
-slow, fully general formatters — so correctness never regresses, and the
-fast path is verified byte-for-byte against the formatters in a dedicated
-test suite.
+`ISO8601` deserves its own close look. Two very different stories
+about speed and correctness live inside it. `string(from:)` first pins an out-of-range `Date` into the range
+`ISO8601DateFormatter` can parse back: the years 0001 through 9999.
+One example of an out-of-range date is one built by mistake from
+milliseconds read as seconds. Writing an unparseable string like `+59009-...` would silently break
+any future read of that row. A pinned value with a logged warning is
+judged better than a value nothing can ever read back right. `date(from:)` first tries a hand-written, no-allocation parser:
+`fastParseCanonicalUTC(_:)`. Only then does it fall back to the much
+slower, ICU-backed `ISO8601DateFormatter`. The comment explains why the fast
+path exists at all. A stack-sampling profile during a large import
+showed the formatter's `date(from:)` using roughly eighty percent of
+total CPU time. A Merkle rollup re-decodes every row's time stamp on
+every insert, which makes the parse cost grow with the square of
+import size. The fast parser knows only the exact canonical shape
+this kit itself writes. It returns `nil` for anything even slightly
+different: a numeric time-zone offset, lowercase letters, or trailing
+junk. That sends control back to the slow, fully general formatters,
+so correctness never slips. The fast path is checked byte-for-byte
+against the formatters in its own test suite.
 
 ### SQLiteStores.swift
 
-This file provides `SQLiteRowStore`, `SQLiteBlobStore`, `SQLiteAuditLog`,
-and `SQLiteTransaction` — four small wrapper types that each forward to
-the shared `SQLiteBackend` actor, giving the actor's internal methods
-their public `RowStore`/`BlobStore`/`AuditLog`/`StorageTransaction`
-faces. `SQLiteRowStore.querySkipCorrupt(...)` is the one method here with
-real logic of its own: rather than inheriting `RowStore`'s protocol-
-extension default (which can only discard an entire failed query), it
-calls `SQLiteBackend.queryRowsSkipCorrupt(...)` directly, so a corrupt
-row found partway through a large corpus scan is skipped and logged
-individually rather than aborting everything already read.
+This file has `SQLiteRowStore`, `SQLiteBlobStore`, `SQLiteAuditLog`,
+and `SQLiteTransaction`. These are four small wrapper types that each
+forward to the shared `SQLiteBackend` actor. They give the actor's own
+methods their public `RowStore`, `BlobStore`, `AuditLog`, and
+`StorageTransaction` faces. `SQLiteRowStore.querySkipCorrupt(...)` is
+the one method here with real logic of its own. Rather than falling
+back to `RowStore`'s protocol-extension default, which can only throw
+away an entire failed query, it calls
+`SQLiteBackend.queryRowsSkipCorrupt(...)` directly. A corrupt row found
+partway through a large corpus scan is skipped and logged on its own,
+rather than aborting everything already read.
 
 ### SQLiteSchema.swift
 
-This file provides `SQLiteSchema`, the enum of pure functions that
-translate a `SchemaDeclaration` into SQLite's native DDL (data definition
-language — the SQL used to create and alter tables, as opposed to the SQL
-used to read and write rows). `nativeType(_:)` maps every
-`ColumnType` case to its SQLite storage class — most map directly, but
-`.uuid` and `.timestamp` both map to `TEXT` because SQLite has no native
-types for either, `.hlc` maps to `INTEGER` because it is stored as a
-packed 64-bit value, and `.fingerprint` maps to `BLOB` because it is
-stored as raw bytes. `createTable(_:)` assembles one `CREATE TABLE IF NOT
-EXISTS` statement covering ordinary columns, generated columns (always
-rendered `STORED`, matching PostgreSQL's lack of a `VIRTUAL` form),
-primary key, and unique constraints. `appendOnlyTriggers(_:)` emits a
-`BEFORE UPDATE`/`BEFORE DELETE` trigger pair for any table declared
-append-only, each one aborting the statement outright with `RAISE(ABORT,
-...)` — the actual enforcement mechanism behind, for example, the erasure
-ledger's append-only guarantee.
+This file has `SQLiteSchema`, the enum of pure functions that turn a
+`SchemaDeclaration` into SQLite's own DDL. DDL stands for data
+definition language, the SQL used to build and change tables, as
+opposed to the SQL used to read and write rows. `nativeType(_:)` maps
+every `ColumnType` case to its SQLite storage class. Most map
+directly, but `.uuid` and `.timestamp` both map to `TEXT`, because
+SQLite has no native type for either. `.hlc` maps to `INTEGER`,
+because it is stored as a packed sixty-four-bit value. `.fingerprint`
+maps to `BLOB`, because it is stored as raw bytes. `createTable(_:)`
+puts together one `CREATE TABLE IF NOT EXISTS` statement. It covers
+plain columns, generated columns, a primary key, and unique rules.
+Generated columns are always rendered `STORED`, to match PostgreSQL's
+lack of a `VIRTUAL` form. `appendOnlyTriggers(_:)` emits a `BEFORE UPDATE`/`BEFORE
+DELETE` trigger pair for any table marked append-only. Each trigger
+stops the statement outright with `RAISE(ABORT, ...)`. This is the
+real enforcement behind, for example, the erasure ledger's
+append-only rule.
 
-This file also owns the three internal bookkeeping tables every SQLite
-estate carries regardless of what schema a caller declares:
-`_storagekit_migrations` (tracks each kit's applied schema version),
-`_storagekit_audit` (the single source of truth for every audit event,
-with full-precision HLC columns alongside the packed integer form — the
-packed form loses a bit of the physical-time field for dates far enough
-in the future, so the full-precision columns exist specifically so a
-cold rebuild of an estate's last-known HLC never silently disagrees with
-what a snapshot originally recorded), and `_storagekit_blobs` (the flat
-key/bytes table backing `SQLiteBlobStore`).
+This file also owns the three bookkeeping tables every SQLite estate
+carries, no matter what schema a caller declares. `_storagekit_migrations`
+tracks each kit's applied schema version. `_storagekit_audit` is the
+one source of truth for every audit event. It stores full-precision HLC columns alongside the packed integer
+form. The packed form loses a bit of the physical-time field for
+dates far enough in the future. The full-precision columns exist so that a cold rebuild
+of an estate's last-known HLC never quietly disagrees with what a
+snapshot first recorded. `_storagekit_blobs` is the flat key-and-bytes
+table backing `SQLiteBlobStore`.
 
 ### SQLitePredicateCompiler.swift
 
-This file provides the translation from a `StoragePredicate` tree into a
-parameterized SQLite `WHERE` clause plus its ordered list of bound
-values. `compile(_:)` is the public entry point; the private recursive
-`render(_:bindings:)` walks the tree case by case, validating every
-column name it touches with `validateSQLIdentifier` before it is
-interpolated, and appending every comparison value to the bindings array
-rather than ever interpolating a value directly — values are always safe
-because SQLite's own parameter-binding mechanism handles them, but column
-and table identifiers cannot be bound as parameters in SQL, which is
-exactly why they need the separate identifier-validation guard instead.
+This file has the translation from a `StoragePredicate` tree into a
+parameterized SQLite `WHERE` clause, plus its ordered list of bound
+values. `compile(_:)` is the public entry point. The private recursive
+`render(_:bindings:)` walks the tree case by case. It checks every
+column name it touches with `validateSQLIdentifier` before that name
+is placed into the string. It appends every comparison value to the
+bindings array, rather than ever placing a value directly into the
+text. Values are always safe this way, because SQLite's own
+parameter-binding step handles them. Column and table names cannot be
+bound as parameters in SQL, which is exactly why they need the
+separate identifier check instead.
 
 ### SQLiteIdentifierValidator.swift
 
-This file provides `validateSQLIdentifier(_:)`, the single free function
-that every write path and the predicate compiler in this module call
-before interpolating any caller-supplied name into a SQL string. The rule
-is simple and strict: the first character must be a letter or an
-underscore, and every following character must be a letter, a digit, or
-an underscore — the safe subset of SQLite identifier syntax. The file's
-own comment states the reason this exists as one shared function rather
-than several private copies: a name containing a double-quote character
-can escape the double-quote delimiter SQL uses around identifiers and
-change what the query actually does, so double-quoting alone is not a
-sufficient defense, and having one seam means the defense cannot silently
-drift out of sync between the several call sites that need it.
+This file has `validateSQLIdentifier(_:)`. Every write path and the
+predicate compiler in this module call this one free function. They
+call it before placing any caller-supplied name into a SQL string. The rule
+is simple and strict. The first character must be a letter or an
+underscore. Every character after that must be a letter, a digit, or
+an underscore. This is the safe part of SQLite identifier syntax. The
+file's own comment states why this exists as one shared function
+rather than several private copies. A name holding a double-quote
+character can escape the double-quote mark SQL uses around
+identifiers. It can change what the query actually does. Double-
+quoting alone is not a strong enough defense on its own. Having one
+seam means the defense cannot quietly drift out of sync between the
+several call sites that need it.
 
 ### SQLiteObserver.swift
 
-This file provides `SQLiteObserverRegistry`, an `actor` holding the
-subscriber lists for both row-change and blob-change notifications on one
-SQLite estate, and `SQLiteObserver`, the public `StorageObserver`
-conformance built on top of it. The file's own comment explains a real
-limitation of SQLite's native `sqlite3_update_hook`: it fires for every
-table, including the internal blob table, but it only reports which
-operation happened on which table and row ID — it never carries the
-actual column values. Because a blob-change notification needs to carry
-the bytes that were written, blob notifications cannot be reconstructed
-from the hook at all; instead, `SQLiteBackend`'s `putBlob`/`deleteBlob`
-methods call this registry's `notifyBlob(_:)` directly, at the exact
-point where the bytes are already in hand.
+This file has `SQLiteObserverRegistry`, an `actor` holding the
+subscriber lists for both row-change and blob-change notices on one
+SQLite estate. It also has `SQLiteObserver`, the public
+`StorageObserver` conformance built on top of it. The file's own
+comment explains a real limit of SQLite's native
+`sqlite3_update_hook`. It fires for every table, including the
+internal blob table. It only reports which operation happened on
+which table and row ID. It never carries the actual column values.
+Because a blob-change notice needs to carry the bytes that were
+written, blob notices cannot be rebuilt from the hook at all. Instead,
+`SQLiteBackend`'s `putBlob`/`deleteBlob` methods call this registry's
+`notifyBlob(_:)` directly, at the exact point where the bytes are
+already in hand.
 
 ### KeychainKeyStore.swift
 
-This file provides `KeychainKeyStore`, the Apple-platform source of the
-whole-database (Mode 3) encryption key — the Apple counterpart to the
-Rust port's per-estate key file on disk. One 256-bit key is stored per
-estate in the system Keychain, under an account name derived
-deterministically from the estate's own file path (`estateAccount(for:)`
-standardizes the path and hashes it with SHA-256), so any process that is
-told the same estate's file path — the main app and a managed
-background server it spawns, in particular — computes the same account
-name and therefore loads the same key without any separate key-
-distribution step. `loadOrCreateKey()` reads an existing key if one is
-present, or generates a fresh cryptographically random key and stores it
-if not, handling the race where two callers try to create the key
-simultaneously by having the loser simply re-read what the winner wrote.
-`deleteKey()` disposes of an estate's key permanently when the estate
-itself is deleted, and is documented as idempotent — calling it on an
-estate whose key is already gone is a success, not an error. The stored
-key's Keychain accessibility level, `afterFirstUnlockThisDeviceOnly`, is
-chosen specifically so a background process can still read the key after
-the very first unlock following a device restart, without the key ever
-leaving the device or syncing to iCloud.
+This file has `KeychainKeyStore`. This is the Apple-platform source
+of the whole-database encryption key, Mode 3. It is the Apple match
+to the Rust port's per-estate key file on disk. One 256-bit key is stored per estate in the system Keychain. Its
+account name is worked out in a fixed way from the estate's own file
+path.
+`estateAccount(for:)` makes the path uniform and hashes it with
+SHA-256. Any process told the same estate's file path works out the
+same account name this way. The main app and a managed background
+server it starts are one such pair of processes. Both load the same
+key with no separate key-sharing step needed. `loadOrCreateKey()` reads an
+existing key if one is present. If not, it makes a fresh, randomly
+generated key and stores it. It handles the case where two callers try to make the key at the
+same time. The loser simply re-reads what the winner wrote. `deleteKey()` gets rid of an estate's
+key for good when the estate itself is deleted. It is documented as
+safe to call twice: calling it on an estate whose key is already gone
+counts as success, not an error. The stored key's Keychain access
+level, `afterFirstUnlockThisDeviceOnly`, is picked for a specific
+reason. A background process can still read the key after the very first
+unlock following a device restart. The key never leaves the device.
+It never syncs to iCloud.
 
 ## Target: PersistenceKitPostgreSQL
 
 ### PostgreSQLStorage.swift
 
-This file provides `PostgreSQLStorage`, the `Storage` conformance for the
-server backend, and the `PostgreSQLBackend` actor that holds the schema
-declaration and drives migrations, transactions, and health
-introspection against a connection pool. The most distinctive design
-decision here is estate isolation: rather than one PostgreSQL database
-per estate, every estate gets its own PostgreSQL schema — a namespace
-within one shared database — named `pk_<estate UUID with dashes
-removed>`. Every pooled connection for that estate pins its
-`search_path` to that schema (keeping `public` on the path too, so any
-shared extension still resolves), which is the PostgreSQL analogue of
-SQLite's one-file-per-estate model: many estates can share one database
-server without their tables ever colliding.
+This file has `PostgreSQLStorage`, the `Storage` conformance for the
+server backend. It also has the `PostgreSQLBackend` actor. That actor
+holds the schema and drives migrations, transactions, and health
+checks against a connection pool. The most distinct design choice
+here is estate isolation. Rather than one PostgreSQL database per
+estate, every estate gets its own PostgreSQL schema. A schema, here,
+is a namespace within one shared database. Each one is named
+`pk_<estate UUID with dashes removed>`. Every pooled connection for
+that estate pins its `search_path` to that schema. `public` stays on
+the path too, so any shared extension still resolves. This is the
+PostgreSQL match to SQLite's one-file-per-estate model. Many estates
+can share one database server without their tables ever colliding.
 
 Schema-version bookkeeping uses a simple key-value table,
 `_storagekit_meta`, rather than a dedicated migrations table like
-SQLite's: a per-kit version is stored under the composite key
-`"schema_version:<kitID>"`, and a running-maximum global version is kept
-under the plain key `"schema_version"` so the no-argument
-`currentSchemaVersion()` still returns something meaningful even when
-several kits share one estate. `storageStats(now:)` implements
-`StorageIntrospection` for PostgreSQL by querying `pg_database_size`,
-`pg_stat_database` (for buffer-cache hit ratio and transaction counters),
-and `pg_locks` joined against `pg_database` (for lock contention) — three
-different system views, each documented in the file with the exact
-formula used to turn its raw counters into the `StorageStats` fields.
+SQLite's. A per-kit version is stored under the mixed key
+`"schema_version:<kitID>"`. A running highest version is kept under
+the plain key `"schema_version"`. This way, the no-argument
+`currentSchemaVersion()` still returns something useful even when
+several kits share one estate. `storageStats(now:)` gives
+`StorageIntrospection` for PostgreSQL by asking three different
+system views. It queries `pg_database_size`. It queries
+`pg_stat_database`, for buffer-cache hit ratio and transaction
+counters. It queries `pg_locks` joined against `pg_database`, for lock
+contention. The file documents the exact formula it uses to turn each
+view's raw counters into `StorageStats` fields.
 
 ### PostgreSQLPool.swift
 
-This file provides `PostgreSQLPool`, a fixed-size connection pool built as
-an `actor` so its bookkeeping — available connections, in-use count,
-waiters — never needs a separate lock. `acquire()` returns an idle
-connection immediately if one exists, opens a brand-new one if the pool
-has not yet reached its configured size, or otherwise suspends the caller
-on a `CheckedContinuation` until either a connection frees up or a timeout
-elapses, at which point the waiter is resumed with
+This file has `PostgreSQLPool`, a fixed-size connection pool built as
+an `actor`. Its bookkeeping never needs a separate lock this way.
+That bookkeeping is open connections, in-use count, and waiters.
+`acquire()` returns
+an idle connection right away if one exists. It opens a brand-new one
+if the pool has not yet reached its set size. Otherwise, it pauses the
+caller on a `CheckedContinuation` until either a connection frees up
+or a timeout passes. At that point, the waiter wakes back up with
 `StorageError.poolExhausted`. Every freshly-opened connection is
-immediately pinned to the estate's dedicated PostgreSQL schema by issuing
-`CREATE SCHEMA IF NOT EXISTS` followed by `SET search_path`, and the
-connection is closed rather than kept if that two-statement setup fails
-partway through, so a half-configured connection is never handed back to
+pinned right away to the estate's own PostgreSQL schema. This happens
+through `CREATE SCHEMA IF NOT EXISTS`, followed by `SET search_path`.
+The connection is closed rather than kept if that two-step setup fails
+partway through, so a half-set-up connection is never handed back to
 a caller.
 
-`parseTLSMode(host:)` resolves the pool's TLS behavior from the
-`ARIA_MCP_POSTGRES_TLS` environment variable, defaulting to `prefer` (try
-TLS, fall back to plaintext if the server does not offer it) whenever the
-variable is absent or holds an unrecognized value — the comment is
-explicit that even a loopback connection defaults to `prefer` rather than
-`disable`, so a caller who genuinely wants plaintext on loopback has to
-say so explicitly rather than getting it as an accidental default.
+`parseTLSMode(host:)` works out the pool's TLS behavior from the
+`ARIA_MCP_POSTGRES_TLS` environment variable. It defaults to `prefer`,
+meaning try TLS first and fall back to plaintext if the server does
+not offer it, whenever the variable is missing or holds a value it
+does not know. The comment is clear that even a loopback connection
+defaults to `prefer` rather than `disable`. A caller who truly wants
+plaintext on loopback has to say so on purpose, rather than getting it
+by accident.
 
 ### PostgreSQLConnection.swift
 
-This file provides free functions that bridge between PersistenceKit's
+This file has free functions that bridge between `PersistenceKit`'s
 `TypedValue` and the `postgres-nio` client library's own binding and
 decoding types. `executeSimple(_:logger:)` and
 `executeParameterized(_:bindings:logger:)` are small `PostgresConnection`
-extension methods that wrap every underlying `postgres-nio` error in
+extension methods. They wrap every underlying `postgres-nio` error in
 `StorageError.backendError`, so a caller never has to catch a
-`postgres-nio`-specific error type directly. `makeBindings(_:)` converts
+`postgres-nio`-specific error type directly. `makeBindings(_:)` turns
 an array of `TypedValue` into the positional `$1, $2, ...` bindings
-PostgreSQL's parameterized-query protocol expects, handling each
-`TypedValue` case's specific wire representation — a `.fingerprint`, for
-example, is serialized as 32 raw bytes in a fixed block order so it
-round-trips exactly.
+PostgreSQL's parameterized-query protocol expects. It handles each
+`TypedValue` case's own wire shape. Take `.fingerprint`, for example.
+It is written out as thirty-two raw bytes in a fixed block order. This
+makes it round-trip exactly.
 
 `decodeRow(_:columns:)` and the private `decodeCell(_:type:)` do the
-reverse: given a returned `PostgresRow` and the caller's expected column
-types, they decode each named cell into the matching `TypedValue` case,
-falling back to `.null` if a cell fails to decode as its declared type
-rather than throwing — a deliberately more permissive stance than the
-SQLite backend's `corruptStoredValue` throw, reflecting that PostgreSQL's
-own wire protocol already enforces column types at a lower level than
-SQLite's flexible column affinity does.
+reverse. Given a returned `PostgresRow` and the caller's expected
+column types, they decode each named cell into the matching
+`TypedValue` case. If a cell fails to decode as its declared type,
+they fall back to `.null` rather than throwing. This is a more open
+stance than the SQLite backend's `corruptStoredValue` throw. It
+reflects that PostgreSQL's own wire protocol already enforces column
+types at a lower level than SQLite's flexible column affinity does.
 
 ### PostgreSQLPredicateCompiler.swift
 
-This file provides the PostgreSQL analogue of `SQLitePredicateCompiler`:
-the same `StoragePredicate` tree compiled to PostgreSQL's own SQL dialect,
-using `$1, $2, ...` positional parameters instead of SQLite's `?`
-placeholders. The case-by-case translation logic is otherwise the same
-shape as the SQLite compiler — every column name is validated with
-`validatePSQLIdentifier` before being interpolated, and every comparison
-value becomes a bound parameter rather than inline text. One PostgreSQL-
-specific detail: the bitmask predicate cases (`bitmaskAll`, `bitwiseEq`)
-have to reference two already-appended bindings by their final numeric
-position (`bindings.count - 1` and `bindings.count`), because PostgreSQL's
-positional parameters are numbered by the order they were bound, unlike
-SQLite's simple `?` placeholders which do not carry a number at all.
+This file has the PostgreSQL match to `SQLitePredicateCompiler`: the
+same `StoragePredicate` tree compiled to PostgreSQL's own SQL dialect.
+It uses `$1, $2, ...` numbered spots instead of SQLite's `?`
+placeholders. The case-by-case translation is otherwise the same
+shape as the SQLite compiler. Every column name is checked with
+`validatePSQLIdentifier` before it is placed into the string. Every
+comparison value becomes a bound parameter rather than inline text.
+One PostgreSQL-only detail stands out. Two bitmask predicate cases
+work this way: `bitmaskAll` and `bitwiseEq`. Both must point at two
+already-appended bindings by their final number: `bindings.count - 1`
+and `bindings.count`. This is because PostgreSQL's numbered spots are
+numbered by the order they were bound, unlike SQLite's plain `?`
+placeholders, which carry no number at all.
 
 ### PostgreSQLSchema.swift
 
-This file provides `PostgreSQLSchemaEmitter`, the PostgreSQL analogue of
-`SQLiteSchema`: pure functions translating a `SchemaDeclaration` into
-PostgreSQL DDL. `typeSQL(_:)` maps each `ColumnType` to its PostgreSQL
-native type — notably `.uuid` maps to a real `UUID` column (unlike
-SQLite's `TEXT` fallback), `.timestamp` maps to `TIMESTAMPTZ`, and `.json`
-maps to `JSONB`, PostgreSQL's indexable binary JSON type. Because
-PostgreSQL has no `CREATE TRIGGER IF NOT EXISTS`, `appendOnlyTriggerStatements(_:)`
-achieves the same idempotence SQLite gets for free by first dropping any
-existing trigger of the same name and then creating it fresh, backed by
-one shared `appendOnlyFunctionSQL` trigger function (created with `CREATE
-OR REPLACE`, so re-running schema setup never fails) that raises an
-exception naming the offending table via PostgreSQL's `TG_TABLE_NAME`
-variable — one function serving every append-only table in the schema,
-rather than one function generated per table.
+This file has `PostgreSQLSchemaEmitter`, the PostgreSQL match to
+`SQLiteSchema`: pure functions that turn a `SchemaDeclaration` into
+PostgreSQL DDL. `typeSQL(_:)` maps each `ColumnType` to its own
+PostgreSQL native type. `.uuid` maps to a real `UUID` column, unlike
+SQLite's `TEXT` fallback. `.timestamp` maps to `TIMESTAMPTZ`.
+`.json` maps to `JSONB`, PostgreSQL's own binary, searchable JSON
+type. PostgreSQL has no `CREATE TRIGGER IF NOT EXISTS`.
+`appendOnlyTriggerStatements(_:)` gets the same repeat-safe behavior
+SQLite gets for free. It first drops any existing trigger of the same
+name, then creates it fresh. One shared `appendOnlyFunctionSQL`
+trigger function backs every append-only table in the schema, rather
+than one function generated per table. It is created with `CREATE OR
+REPLACE`, so running schema setup again never fails. It raises an
+error naming the table at fault, through PostgreSQL's `TG_TABLE_NAME`
+variable.
 
 ### PostgreSQLStores.swift
 
-This file provides `PostgreSQLRowStore`, `PostgreSQLBlobStore`, and
-`PostgreSQLAuditLog` — the concrete `RowStore`, `BlobStore`, and
-`AuditLog` conformances for the PostgreSQL backend, each able to run
-either against a pooled connection acquired for a single call or against
-a `PostgreSQLTransactionContext`'s already-open connection when called
-from inside a transaction block. Every write method here validates SQL
-identifiers with `validatePSQLIdentifier`, exactly as the SQLite backend
-does, before assembling its SQL string.
+This file has three concrete conformances for the PostgreSQL
+backend: `PostgreSQLRowStore`, `PostgreSQLBlobStore`, and
+`PostgreSQLAuditLog`. These match `RowStore`, `BlobStore`, and
+`AuditLog`. Each one can run
+either against a pooled connection grabbed for a single call, or
+against a `PostgreSQLTransactionContext`'s already-open connection
+when called from inside a transaction block. Every write method here
+checks SQL names with `validatePSQLIdentifier`, exactly as the SQLite
+backend does, before it puts together its SQL string.
 
 `PostgreSQLRowStore.query(...)` reads the schema's declared column list
-for the target table (rather than issuing a bare `SELECT *`) specifically
+for the target table, rather than issuing a bare `SELECT *`. This is
 so a generated column's PostgreSQL-computed value is decoded with the
-correct `ColumnType`, and it runs every returned row's values through
-`decryptedForRead` before wrapping them in a `StorageRow`. `update(...)`
-and `delete(...)` both compile their predicate starting at parameter
-index one past the last `SET`-clause binding, using the private
-`renderPredicate(_:startIndex:bindings:)` helper, which compiles the
-predicate normally and then renumbers every `$N` placeholder in reverse
-order — high numbers first — specifically to avoid `$10` being
-accidentally rewritten by a naive forward replacement of `$1`.
-`PostgreSQLBlobStore` and `PostgreSQLAuditLog` each lazily create their
-own backing table (`_storagekit_blobs`, `_storagekit_audit`) on first use
-via `CREATE TABLE IF NOT EXISTS`, rather than requiring the caller's
-schema declaration to know about them — the same design PersistenceKit
-uses for SQLite's internal tables. `decodeAuditEvent(_:)` decodes the
-audit row's required fields strictly (a decode failure there propagates
-as a thrown error) while treating optional before-state fields
-permissively (`try?`, because `NULL` is the expected, valid value for "no
-prior state").
+right `ColumnType`. It also runs every returned row's values through
+`decryptedForRead` before wrapping them in a `StorageRow`.
+`update(...)` and `delete(...)` both compile their predicate starting
+at the parameter spot right after the last `SET`-clause binding. They
+use the private `renderPredicate(_:startIndex:bindings:)` helper. This
+helper compiles the predicate as usual. It then renumbers every `$N`
+placeholder in reverse order, high numbers first. It does this on
+purpose, to avoid `$10` being wrongly rewritten by a simple forward
+swap of `$1`.
+`PostgreSQLBlobStore` and `PostgreSQLAuditLog` each lazily build their
+own backing table on first use, through `CREATE TABLE IF NOT EXISTS`.
+The tables are `_storagekit_blobs` and `_storagekit_audit`. Neither one needs the
+caller's own schema to know about them. This is the same design
+`PersistenceKit` uses for SQLite's own internal tables.
+`decodeAuditEvent(_:)` decodes the audit row's required fields in a
+strict way, so a decode failure there passes on as a thrown error. It
+treats optional before-state fields in a looser way, with `try?`.
+`NULL` is the expected, valid value for "no prior state," and that
+value is always safe there.
 
 ### PostgreSQLIdentifierValidator.swift
 
-This file provides `validatePSQLIdentifier(_:)`, the PostgreSQL-module
-analogue of `SQLiteIdentifierValidator.swift`'s `validateSQLIdentifier`,
-enforcing the exact same rule — first character a letter or underscore,
-every later character a letter, digit, or underscore. The file's own
-comment names this as one of three independent seams implementing the
-identical rule: this one, the SQLite module's, and the Rust port's
-`validate_sql_identifier` — three copies by necessity, since Swift
-extensions cannot share a free function across two separate targets
-without a shared dependency neither module otherwise needs, but each
-copy is the single seam within its own module, so within a module the
-rule cannot silently drift.
+This file has `validatePSQLIdentifier(_:)`, the PostgreSQL-module
+match to `SQLiteIdentifierValidator.swift`'s `validateSQLIdentifier`.
+It enforces the exact same rule. The first character must be a
+letter or underscore. Every later character must be a letter, a
+digit, or an underscore. The file's own comment names this as one of three
+copies that enforce this same rule on their own. The other two are
+the SQLite module's copy and the Rust port's `validate_sql_identifier`
+function. Three copies exist by need. Swift extensions cannot share a
+free function across two separate targets without a shared dependency
+neither module otherwise needs. Each copy is still the single seam
+within its own module, so the rule cannot quietly drift within a
+module.
 
 ## Target: PersistenceKitReplication
 
 ### ReplicationTypes.swift
 
-This file provides the two public types every other file in this module
+This file has the two public types every other file in this module
 builds on. `ReplicationCursor` is the opaque watermark a caller stores
-and passes back into a later incremental sync: it carries the highest HLC
-seen across every copied row and audit event, plus counts of rows,
-audit events, and blobs written during that run. `ReplicationError` is
-the closed error type specific to replication — `schemaMismatch` (source
-and destination disagree on schema version or kit ID; replication
-deliberately refuses to auto-migrate either side) and `storageFailure`
-(an underlying `StorageError` surfaced during the copy, re-wrapped as a
-plain string so `ReplicationError` itself can stay `Equatable`, which a
-raw `Error` cannot generally guarantee).
+and passes back into a later incremental sync. It carries the highest HLC seen across every copied row and audit
+event. It also carries counts of rows, audit events, and blobs
+written during that run. `ReplicationError` is
+the closed error type for replication on its own. `schemaMismatch`
+fires when source and destination disagree on schema version or kit
+ID. Replication on purpose refuses to auto-migrate either side.
+`storageFailure` wraps an underlying `StorageError` surfaced during
+the copy, re-wrapped as a plain string. This lets `ReplicationError`
+itself stay `Equatable`, which a raw `Error` cannot always guarantee.
 
 ### StorageReplicator.swift
 
-This file provides `StorageReplicator`, the full-snapshot replication
-primitive: `replicate(from:to:schema:)` and its two direction-named
-conveniences, `flush(from:into:schema:)` (in-memory into durable storage)
-and `hydrate(into:from:schema:)` (durable storage into a fresh in-memory
-instance). "Full snapshot" means exactly what it says — every run copies
-every row in every schema-declared table, every audit event, and every
-blob, regardless of what changed since the last run. The function is
-still idempotent, though: every row upsert uses the table's own primary
-key as its conflict column, not the random UUID a fresh `RowHandle` would
-carry, so running the same flush twice against an unchanged source
-updates existing destination rows in place rather than ever inserting a
-second copy.
+This file has `StorageReplicator`, the full-snapshot replication
+tool. `replicate(from:to:schema:)` is the core function. Two
+direction-named helpers sit on top of it: `flush(from:into:schema:)`
+moves in-memory data into durable storage, and `hydrate(into:from:schema:)`
+moves durable storage into a fresh in-memory copy. "Full snapshot"
+means exactly what it says. Every run copies everything, no matter what changed since the last
+run. This means every row in every schema-declared table, every audit
+event, and every blob. The function still stays even on
+repeat runs, though. Every row upsert uses the table's own primary
+key as its conflict column, not the random UUID a fresh `RowHandle`
+would carry. Running the same flush twice against an unchanged source
+updates existing target rows in place, rather than ever
+inserting a second copy.
 
-The implementation runs in three ordered steps. Step one is a schema
-gate: source and destination must report the exact same per-kit schema
+The work runs in three ordered steps. Step one is a schema gate.
+Source and destination must report the exact same per-kit schema
 version, or the function throws `ReplicationError.schemaMismatch`
-immediately rather than attempting any copy. Step two reads the entire
-source — every table's rows (with any generated columns filtered out of
-each row, because writing a value into a column the destination computes
-itself would be rejected by both SQL backends), every audit event, and
-every blob — into one `Sendable` in-memory payload, before the
-destination transaction ever opens; the file's comment explains this
-ordering exists so the destination is never left holding a long-lived
-serializable transaction open while potentially slow source I/O runs
-underneath it. Step three writes that entire payload into the destination
-inside one serializable transaction, so a crash or a thrown error partway
-through leaves the destination exactly as it was before the flush began.
-A blob-deletion pass at the end of step three removes any destination
-blob key absent from the source snapshot, closing a gap the file
-documents by its fix identifier (SECFIX-WS2-PK F5): without it, a blob
-deleted at the source would linger forever in the destination after every
-future full-snapshot flush, because an additive-only copy never notices
-an absence.
+right away, rather than trying any copy at all. Step two reads the
+entire source into memory: every table's rows, every audit event,
+and every blob. Any generated columns are filtered out of each row
+first, because writing a value into a column the target computes
+on its own would be turned down by both SQL backends. All of this
+goes into one `Sendable` in-memory payload, before the target
+transaction ever opens. The
+file's comment explains this order. It exists so the target is
+never left holding a long-lived serializable transaction open while
+slow source work runs underneath it. Step three writes that entire
+payload into the target inside one plain transaction. A
+crash or a thrown error partway through therefore leaves the
+target exactly as it was before the flush began. A blob-deletion
+pass at the end of step three removes any target blob key absent
+from the source snapshot. This closes a gap the file names by its fix
+ID, SECFIX-WS2-PK F5. Say this pass did not exist. A blob deleted at
+the source would linger forever in the target, after every later
+full-snapshot flush. A copy that only ever adds rows never notices
+that something is missing.
 
 ### IncrementalReplicationSession.swift
 
-This file provides `IncrementalReplicationSession`, the observer-driven
-alternative to a full snapshot: instead of copying everything on every
-run, it watches a source's live change stream and, on demand, syncs only
-the rows and blobs that actually changed since the last sync. The file's
-opening comment lays out the design choice explicitly: rather than a
-durable dirty-row table written on every observed change (which would tie
-this backend-agnostic module to one particular storage schema), the
-session accumulates dirty identifiers purely in memory, inside two actors
-— `DirtySet` for rows and `BlobDirtySet` for blobs — and re-reads each
-dirty row's current state from the source at sync time rather than
-trusting whatever the original change notification said, because the row
-may have changed again since it was first marked dirty. If the process
-restarts, the in-memory dirty-set is lost; the documented recovery is
-simply to fall back to a full snapshot, which is always a safe substitute
-for a lost incremental history.
+This file has `IncrementalReplicationSession`, the observer-driven
+alternative to a full snapshot. Instead of copying everything on every
+run, it watches a source's live change stream. On demand, it syncs
+only the rows and blobs that truly changed since the last sync. The
+file's opening comment lays out the design choice in plain terms.
+A durable dirty-row table, written on every observed change, would
+tie this backend-agnostic module to one particular storage schema.
+The session avoids that. It gathers dirty IDs purely in memory
+instead, inside two actors: `DirtySet` for rows and `BlobDirtySet`
+for blobs. It re-reads each dirty row's current state from the source
+at sync time. It does not trust whatever the original change notice
+said. The row may have changed again since it was first marked dirty.
+If the process restarts, the in-memory dirty set is lost. The fix for
+that, as the file notes, is simple. Fall back to a full snapshot. That
+always works as a safe stand-in for a lost incremental history.
 
-`DirtyKey` identifies one dirty row by its table name and its primary-
-key values, encoded into a sortable string so that draining the dirty set
-always produces the same processing order across repeated runs — this
-determinism is what makes two different processes independently syncing
-the same dirty set produce an identical, and therefore safely repeatable,
-sequence of destination writes. `DirtySet.accumulate(_:)` extracts the
-primary-key columns from an observed `TableChange`'s values dictionary,
-logging and skipping (rather than crashing) if a conforming-but-buggy
-backend ever emits a change missing one of those columns. `BlobDirtySet`
-tracks the same idea for blobs, but because a blob change notification
-already carries its own payload bytes, `BlobDirtySet` has no need to
-re-read anything from the source at sync time — a `put` supersedes an
-earlier `put` for the same key, and a `delete` supersedes a `put`,
-last-write-wins.
+`DirtyKey` names one dirty row by its table name and its
+primary-key values, packed into a sortable string. Draining the dirty
+set therefore always produces the same order of work across repeated
+runs. This fixed order is what makes two different processes
+independently syncing the same dirty set produce an identical, and
+so safely repeatable, run of target writes.
+`DirtySet.accumulate(_:)` pulls the primary-key columns out of an
+observed `TableChange`'s values. If a conforming-but-buggy backend
+ever emits a change missing one of those columns, the function logs
+it and skips it, rather than crashing. `BlobDirtySet` tracks the same idea for
+blobs. A blob change notice already carries its own payload bytes, so
+`BlobDirtySet` never needs to re-read anything from the source at
+sync time. A `put` replaces an earlier `put` for the same key. A
+`delete` replaces a `put`. The last write always wins.
 
-`sync(from:to:fromCursor:)` is the operation a caller actually invokes.
-It repeats the same schema gate `StorageReplicator` uses, drains both
-dirty sets, re-scans each dirty row from the source (turning an
-now-missing row into a destination delete rather than an upsert, since
-the row was deleted at the source between the original change
-notification and this re-scan), fetches only the audit events newer than
-the previous cursor's watermark, and commits everything inside one
-serializable destination transaction — the same fail-loud, all-or-nothing
-shape `StorageReplicator` uses for a full snapshot. The retry-preservation
-contract is the piece unique to the incremental path: if anything fails
-after the dirty sets have already been drained, the drained keys and blob
-operations are restored into the sets — awaited synchronously in the
-`catch` block, never handed off to a detached background task, because a
-fire-and-forget restore could race an immediate caller retry and silently
-lose the very keys it was trying to preserve — so a subsequent retry
-re-attempts exactly the rows and blobs the failed run did not finish.
+`sync(from:to:fromCursor:)` is the operation a caller actually calls.
+It repeats the same schema gate `StorageReplicator` uses. It drains
+both dirty sets. It re-scans each dirty row from the source. A
+now-missing row turns into a target delete rather than an upsert.
+This happens because the row was deleted at the source between the
+original change notice and this re-scan. It fetches only the audit events newer than
+the previous cursor's watermark. It commits everything inside one
+plain target transaction, all in one go, the same fail-loud
+shape `StorageReplicator` uses for a full snapshot. The
+retry-keeping rule is the one piece unique to the incremental path.
+Say anything fails after the dirty sets have already been drained. The
+drained keys and blob operations go back into the sets. This restore
+is awaited right there in the `catch` block. It is never handed off
+to a detached background task. A fire-and-forget restore could race a
+caller's immediate retry. It could quietly lose the very keys it was
+trying to keep safe. A later retry then tries again on exactly the
+rows and blobs the failed run did not finish.
 
 ## Rust Port and Conformance
 
-The `rust/` directory contains a second implementation of PersistenceKit's
-design for use outside the Swift/Apple ecosystem: the same closed
-`StoragePredicate` algebra, the same `TypedValue` case set, the same
-`Storage`/`RowStore`/`BlobStore`/`AuditLog`/`StorageObserver` trait
-surface, and all three backends (`InMemoryStorage`, `SqliteStorage`,
-`PostgresStorage`), plus Rust equivalents of the caching decorator, the
-hashing decorator, the encryption seam, and both replication modes. The
-Rust traits are synchronous (`Result<T, StorageError>`) rather than
-`async`, because the Rust backends do no real asynchronous I/O of their
-own; the port's `README.md` notes that Swift's `async` requirement comes
-from Swift actors specifically, and a future backend that does need
-asynchronous I/O could wrap its own runtime without changing the trait
-shape.
+The `rust/` folder holds a second build of `PersistenceKit`'s design,
+for use outside the Swift and Apple world. It has the same closed `StoragePredicate` algebra and the same
+`TypedValue` case set. It also has the same trait surface: `Storage`,
+`RowStore`, `BlobStore`, `AuditLog`, and `StorageObserver`. It has all
+three backends too:
+`InMemoryStorage`, `SqliteStorage`, and `PostgresStorage`. It adds four things on top of these: the caching decorator, the
+hashing decorator, the encryption seam, and both replication modes.
+The Rust traits are plain. They use `Result<T, StorageError>` rather
+than `async`. This is because the Rust backends do no real async
+work of their own. The port's own `README.md` notes that Swift's `async` need comes
+from Swift actors in particular. A future backend that does need
+async work of its own could wrap its own runtime without changing the
+trait shape.
 
-Unlike LatticeLib's two legs, the Swift and Rust sides of PersistenceKit
-are not gated by a shared, byte-identical conformance-fixture corpus.
-PersistenceKit's cross-platform contract is a shared protocol shape and a
-shared wire format — the same `TypedValue` cases, the same predicate
-tree, the same identifier-validation rule — rather than a promise that
-identical input always produces bit-identical output on both legs.
-Each side carries its own test suite: the Rust SQLite and PostgreSQL
-backends each run a ten-test conformance battery covering schema, rows,
-predicates, blobs, audit, generated columns, transactions, append-only
-enforcement, and introspection, exercised directly against the Rust
-trait implementations rather than cross-checked against the Swift
-package's own test output.
+Unlike LatticeLib's two legs, the Swift and Rust sides of
+`PersistenceKit` are not gated by a shared, byte-for-byte conformance-
+fixture set. `PersistenceKit`'s cross-platform contract is a shared
+protocol shape and a shared wire format: the same `TypedValue` cases,
+the same predicate tree, the same identifier-checking rule. It is not
+a promise that the same input always produces bit-identical output on
+both legs. Each side runs its own test suite. The Rust SQLite and
+PostgreSQL backends each run a ten-test conformance set covering
+schema, rows, predicates, blobs, audit, generated columns,
+transactions, append-only rules, and health checks. These tests run
+straight against the Rust trait code, not cross-checked against the
+Swift package's own test output.
