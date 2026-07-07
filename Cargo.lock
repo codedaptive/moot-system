@@ -665,7 +665,7 @@ dependencies = [
 [[package]]
 name = "intellectus-lib"
 version = "0.1.0"
-source = "git+https://github.com/codedaptive/moot-core?tag=v1.0.25#eff42514594aa269959615bbb5bf62258abe2151"
+source = "git+https://github.com/codedaptive/moot-core?tag=v1.0.26#a4ded7cbe36011ede13d27793bfcafc13ee9cdae"
 
 [[package]]
 name = "itoa"
@@ -1385,7 +1385,7 @@ dependencies = [
 [[package]]
 name = "substrate-types"
 version = "1.0.0-skeleton"
-source = "git+https://github.com/codedaptive/moot-core?tag=v1.0.25#eff42514594aa269959615bbb5bf62258abe2151"
+source = "git+https://github.com/codedaptive/moot-core?tag=v1.0.26#a4ded7cbe36011ede13d27793bfcafc13ee9cdae"
 
 [[package]]
 name = "subtle"
