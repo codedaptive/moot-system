@@ -2,8 +2,8 @@
 doc: AGENT_MAP
 package: ConvergenceKit
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/ConvergenceKit/SyncEngine.swift
     blob: 32e69e0ea5002d8b699866183371527f675023cd
@@ -14,7 +14,7 @@ sources:
   - path: Sources/ConvergenceKitCloudKit/CKRecordMapping.swift
     blob: 9b61903296533f8044bee5a4f93ca2dc1b76b653
   - path: Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift
-    blob: 7dd43ccf5454739a3d1ae1cda0870cf507c479c6
+    blob: 0ea4d12140516ad32d6edb1b910c2c0cc920c46e
   - path: Sources/ConvergenceKitFederation/FederationIdentity.swift
     blob: b64358fe36fd241049e9f5bdbbb335f1f3d29464
   - path: Sources/ConvergenceKitFederation/FederationSyncEngine.swift
@@ -30,6 +30,10 @@ sources:
 PURPOSE: replicates PersistenceKit rows across device/estate boundaries. One protocol (SyncEngine), three interchangeable backends (None/CloudKit/Federation). App writes only to PersistenceKit; backend observes via StorageObserver, ships via SyncRecord wire format, applies inbound through PersistenceKit's own write path (RowStore.upsert/insert/delete), which fires StorageObserver again on the receiving side.
 
 DEPS: core target imports SubstrateTypes (HLC, Fingerprint256), PersistenceKit (Storage, StorageObserver, TableChange, TypedValue). ConvergenceKitCloudKit adds CloudKit, os. ConvergenceKitFederation adds Crypto (swift-crypto, Ed25519), os. ConvergenceKitNone adds nothing beyond core. Imported by: NONE within the SDK at this commit: application-layer composition only; QueueKit's Package.swift explicitly excludes it as a dependency (spec §11, DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md). Rust port in rust/ mirrors core types + wire format + None/Federation backends; CloudKit has no Rust port (Apple-only, by design).
+
+
+CURRENT TRUE-UP:
+- v1.0.24: CloudKit LWW stores per-row sync HLC data in `_ck_sync_meta`. Inbound rows compare against that side table before apply.
 
 ENTRY POINTS (most callers need only these):
 - SyncEngine.swift:26 `SyncEngine.enable(manifest:storage:) async throws`: call once before push/pull/subscribe

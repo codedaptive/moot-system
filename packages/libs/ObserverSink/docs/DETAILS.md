@@ -2,16 +2,28 @@
 doc: DETAILS
 package: ObserverSink
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/ObserverSink/PersistenceStatsSink.swift
-    blob: e76c55599795f4bc85b860a4901dc9ab04dd201f
+    blob: 103d3c53ca69aaef22d4066f11b2655ddb944252
   - path: Sources/ObserverSink/StatsStore.swift
-    blob: 483c736feffd82821a8d77030afde0e182d320fc
+    blob: 4f4d25a8eeaff0a3998721bb105519815e00eb28
 ---
 
 # ObserverSink Details
+
+## Current Release Details
+
+Monitoring now has a source marker.
+Fresh stores seed monitoring as on with source `default`.
+A user toggle writes source `user`.
+A later open then preserves that choice.
+Older stores with missing source data are migrated carefully.
+
+Schema v5 adds the composite metric index `(dropbox_id, name, ts)`.
+`queryLatestMetricsByNamesAndDropboxes` uses that index for latest-value reads.
+`queryMetricAggregatesByDropbox` uses it for dashboard counts and timestamps.
 
 This document walks through both source files in the package. Read
 `OVERVIEW.md` first for the big picture. `PersistenceStatsSink.swift`

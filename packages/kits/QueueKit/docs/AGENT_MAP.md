@@ -2,8 +2,8 @@
 doc: AGENT_MAP
 package: QueueKit
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/QueueKit/DrainLease.swift
     blob: 3f1df6aa1fab44c993bd49d96de179ff03450303
@@ -22,7 +22,7 @@ sources:
   - path: Sources/QueueKit/QueueKit.swift
     blob: 3878243f6da8ad1b55bba5271f7502e8d6b8e3d7
   - path: Sources/QueueKit/QueueKitTelemetry.swift
-    blob: 0e656863d2c9f8e83dc13fc8b6b94ae2f25ecf06
+    blob: 7b117578b25d9e4c2df18f4a2835d987a4a893f7
   - path: Sources/QueueKit/Watcher.swift
     blob: cf2b270b9c60da34f7a25c016f8c18b6ba6149e4
 ---
@@ -32,6 +32,10 @@ sources:
 PURPOSE: general-purpose durable work queue. Producer→`send`/`writeBatch`→backend; consumer→`drain`/`watch`→claims jobs; consumer→`reply`→terminal completion. Two swappable backends (`FilesystemBackend` POSIX maildir, `PersistenceKitBackend` shared SQLite table) behind one `QueueBackend` protocol and one public `QueueKit` facade. Stream-scoped ops (ADR-021 Decision 7 / T1) let multiple consumers share one queue without stealing each other's jobs.
 
 DEPS: imports SubstrateTypes (HLC/HLCGenerator: hybrid logical clock), PersistenceKit (Storage, rowStore, transaction, observer: PersistenceKitBackend only), IntellectusLib (self-report telemetry, DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28). ConvergenceKit is application-layer composition and deliberately NOT a dependency (spec §11). Imported by: none within this repo checkout; source comments name CorpusKit and GeniusLocusKit as external mount-time consumers (not present in moot-system). Rust port in rust/ (8 files, ~3k lines) mirrors facade + both backends, PersistenceKitBackend behind `persistencekit` cargo feature. Python port in python/queuekit/ mirrors FilesystemBackend only (spec §2: Python has no PersistenceKit backend). All three gated by shared conformance fixtures in Tests/QueueKitTests/Fixtures/*.json.
+
+
+CURRENT TRUE-UP:
+- v1.0.24: queue metrics sample every drain tick but emit at most once per 30 seconds per estate stream. `QueueLatencyWindowBox` owns both window state and throttle state under one lock.
 
 ENTRY POINTS (most callers need only these):
 - QueueKit.swift:53 `QueueKit.init(root:hlcGenerator:) throws`: mount FilesystemBackend at root, create maildir, clean stale tmp/

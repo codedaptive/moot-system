@@ -2,16 +2,23 @@
 doc: DETAILS
 package: LoopbackHTTP
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/LoopbackHTTP/HTTPWire.swift
     blob: c07525c2583c06aa8406287eef5cb17279b9b86a
   - path: Sources/LoopbackHTTP/POSIXSocket.swift
-    blob: 6dfba4dee7ad3121d47c8bfc937854c6f13ad1b1
+    blob: 29a9202773e71b964acc5a3ebca742c36e7cbd9f
 ---
 
 # LoopbackHTTP Details
+
+## Current Release Details
+
+`POSIXSocket.acceptOne` marks Darwin client sockets with `SO_NOSIGPIPE`.
+`POSIXSocket.sendAll` uses `MSG_NOSIGNAL` on Linux.
+A peer that closes mid-response now returns a failed write.
+The transport caller can handle that error path without a process signal.
 
 This document walks through every source file in the package. Read
 `OVERVIEW.md` first for the big picture. Files appear here in pipeline

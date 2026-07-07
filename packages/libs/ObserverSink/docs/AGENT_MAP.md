@@ -2,13 +2,13 @@
 doc: AGENT_MAP
 package: ObserverSink
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/ObserverSink/PersistenceStatsSink.swift
-    blob: e76c55599795f4bc85b860a4901dc9ab04dd201f
+    blob: 103d3c53ca69aaef22d4066f11b2655ddb944252
   - path: Sources/ObserverSink/StatsStore.swift
-    blob: 483c736feffd82821a8d77030afde0e182d320fc
+    blob: 4f4d25a8eeaff0a3998721bb105519815e00eb28
 ---
 
 # AGENT_MAP: ObserverSink
@@ -16,6 +16,10 @@ sources:
 PURPOSE: reusable PersistenceKit-backed telemetry sink for the MOOTx01 manager pipeline (Manager 1.0, Phase 0.5). IntellectusLib.report(_:) → PersistenceStatsSink.receive(_:) → flag-gated SQLite write into StatsStore (metric_samples / event_samples). Also owns topology_snapshots (governor write, dashboard read) and store-level retention.
 
 DEPS: imports IntellectusLib (StatsSink protocol, StatSample/EventKind datum), PersistenceKit + PersistenceKitSQLite (Storage/SchemaDeclaration/RowStore, SQLiteStorage backend), Foundation, OSLog. Dependency hierarchy (no inversion, per MANAGER_1.0_PLAN.md §4): IntellectusLib (floor) → PersistenceKit (kit) → ObserverSink (this lib). Imported by: none within the moot-system repo at this commit: Package.swift comments name the intended consumers (Intellectus install site in AriaResident/aria-mcp, moot-mgr manager) as living outside this repo. Rust port in rust/ (crate `observer-sink`) mirrors schema + flag semantics exactly; conformance tests in Tests/ObserverSinkTests/ObserverSinkConformanceTests.swift and rust/tests/conformance.rs gate parity (16 scenarios).
+
+
+CURRENT TRUE-UP:
+- v1.0.24: `PersistenceStatsSink` caps in-flight writes at 64. `StatsStore.schemaVersion` is 5. Monitoring defaults on with a source marker. Composite metric index `(dropbox_id, name, ts)` backs latest-value and aggregate dashboard queries.
 
 ENTRY POINTS (most callers need only these):
 - PersistenceStatsSink.swift:102 `PersistenceStatsSink.init(store:dropboxID:)`: construct the sink; store must already be `.open()`ed

@@ -2,16 +2,26 @@
 doc: OVERVIEW
 package: ObserverSink
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/ObserverSink/PersistenceStatsSink.swift
-    blob: e76c55599795f4bc85b860a4901dc9ab04dd201f
+    blob: 103d3c53ca69aaef22d4066f11b2655ddb944252
   - path: Sources/ObserverSink/StatsStore.swift
-    blob: 483c736feffd82821a8d77030afde0e182d320fc
+    blob: 4f4d25a8eeaff0a3998721bb105519815e00eb28
 ---
 
 # ObserverSink Overview
+
+## Current Release Notes
+
+ObserverSink now bounds telemetry write pressure.
+`PersistenceStatsSink` drops samples when 64 write tasks are already in flight.
+`StatsStore` opens at schema version 5.
+It keeps monitoring on by default unless a user setting says otherwise.
+
+The metric store has new indexed query helpers.
+They fetch the latest value and per-dropbox counts without scanning millions of rows.
 
 ## What This Library Does
 

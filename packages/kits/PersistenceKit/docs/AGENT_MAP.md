@@ -2,8 +2,8 @@
 doc: AGENT_MAP
 package: PersistenceKit
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/PersistenceKit/AuditLog.swift
     blob: ca4c0c9623056a49ad888a7a77e720a7519556bb
@@ -12,7 +12,7 @@ sources:
   - path: Sources/PersistenceKit/CacheInvalidator.swift
     blob: 0a844b8037404dd72d08df6887ceee1e8c6014f2
   - path: Sources/PersistenceKit/CachingRowStore.swift
-    blob: 7edf9a86eb31dd9a17abd97b7baa9e8d5425e266
+    blob: 08c54bce31a93ae4768a7bb5ec054a39cb1d0a6f
   - path: Sources/PersistenceKit/Column.swift
     blob: 3cfc3ba856ebe15e8756ae65dae736cbd2c288a6
   - path: Sources/PersistenceKit/EncryptionMode.swift
@@ -24,7 +24,7 @@ sources:
   - path: Sources/PersistenceKit/EstateCacheConfig.swift
     blob: 7003951cb5b2b075b6bb0c49b5fe372a97bfeb3a
   - path: Sources/PersistenceKit/EstateConfiguration.swift
-    blob: be91569405e5c48a99859b4595540a59bd1a1994
+    blob: 66d1e2b5629defaaaf66f9f6ae5802d28a7c8e2f
   - path: Sources/PersistenceKit/GCPin.swift
     blob: 73336dc4c693fcfa285a7eff8ed6520f27951ff8
   - path: Sources/PersistenceKit/GeneratedColumn.swift
@@ -40,7 +40,7 @@ sources:
   - path: Sources/PersistenceKit/Predicate.swift
     blob: 522802c842dfc7573137efd7a3f36300d5201468
   - path: Sources/PersistenceKit/RowCrypto.swift
-    blob: 6678e426c0902cdae6d164904001526756e40916
+    blob: 45b360ff423e8c9bc294caca406771331e45e2fb
   - path: Sources/PersistenceKit/RowStore.swift
     blob: 9a96ff89528ca786d51224324cacb78cf810037d
   - path: Sources/PersistenceKit/Schema.swift
@@ -82,9 +82,9 @@ sources:
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLSchema.swift
     blob: f165f0877b96c87e2f7de46012f8f8acb3c03cc8
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLStorage.swift
-    blob: 849926f9e6def788fae2f38757ad44bcd52a18a0
+    blob: 305d1983d13862e2f10176999aff2477eab0f28e
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLStores.swift
-    blob: bff90838d1324d82ae76a0895f15399537e9e343
+    blob: f24f390efe6066f2730f3a5b9117ec8038fd0b0d
   - path: Sources/PersistenceKitReplication/IncrementalReplicationSession.swift
     blob: 2f90378146e043d75c739d400d98c7770e07af78
   - path: Sources/PersistenceKitReplication/ReplicationTypes.swift
@@ -94,7 +94,7 @@ sources:
   - path: Sources/PersistenceKitSQLite/KeychainKeyStore.swift
     blob: 0071732291a7cb6ce0777bd230a6188276fb4f32
   - path: Sources/PersistenceKitSQLite/SQLiteConnection.swift
-    blob: d1e0aee8f4dceb815b24c3aac619ad71b4edcae9
+    blob: 15b8d0631847abf343f5af6e90cff148597cfaf1
   - path: Sources/PersistenceKitSQLite/SQLiteIdentifierValidator.swift
     blob: 713339c137d6af1cfbba5a3584e05bdda70b42c5
   - path: Sources/PersistenceKitSQLite/SQLiteObserver.swift
@@ -104,7 +104,7 @@ sources:
   - path: Sources/PersistenceKitSQLite/SQLiteSchema.swift
     blob: 4ba6fc175fe9d486b17af1088a23da64041b12ae
   - path: Sources/PersistenceKitSQLite/SQLiteStorage.swift
-    blob: 2c73892fba5b5b4c6608dac070b1c2159f4538c6
+    blob: d4b4e9c7c3229dbfd29df0453456f7b9bd2cb9c6
   - path: Sources/PersistenceKitSQLite/SQLiteStores.swift
     blob: 76499ffb70d979f0d13e8cf9e32bc38ff28ffdb5
 ---
@@ -132,6 +132,10 @@ target directly except at estate-construction time. Rust port in
 conformance-fixture-gated against the Swift side (no shared byte-
 identical corpus): the cross-language contract is the protocol shape
 and wire format only.
+
+
+CURRENT TRUE-UP:
+- v1.0.24: `EstateConfiguration.residencyHint` defaults to `.diskBacked`; `.ramResident` preserves the old heap cache path. SQLite uses mmap and 0600 files. Transactions invalidate present cache entries. RowCrypto allows empty content for expunge. Audit `reason` columns migrate on open.
 
 ENTRY POINTS (most callers need only these):
 - Storage.swift:16 `protocol Storage`: conform once per backend; exposes `.rowStore`/`.blobStore`/`.auditLog`/`.observer`

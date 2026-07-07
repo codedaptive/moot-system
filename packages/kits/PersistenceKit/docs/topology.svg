@@ -3,29 +3,29 @@
 doc: topology
 package: PersistenceKit
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/PersistenceKit/Storage.swift
     blob: 7484a40913b28cb11a6bd2e3ea822dc8fe8eb63e
   - path: Sources/PersistenceKit/RowStore.swift
     blob: 9a96ff89528ca786d51224324cacb78cf810037d
   - path: Sources/PersistenceKit/CachingRowStore.swift
-    blob: 7edf9a86eb31dd9a17abd97b7baa9e8d5425e266
+    blob: 08c54bce31a93ae4768a7bb5ec054a39cb1d0a6f
   - path: Sources/PersistenceKit/HashingRowStore.swift
     blob: fe233ed2f4fda177373ad105d14fa321d325d0df
   - path: Sources/PersistenceKit/RowCrypto.swift
-    blob: 6678e426c0902cdae6d164904001526756e40916
+    blob: 45b360ff423e8c9bc294caca406771331e45e2fb
   - path: Sources/PersistenceKit/ErasureOverlay.swift
     blob: d5a86f2baa10647134f285d6996a8e62cbe23ace
   - path: Sources/PersistenceKit/SnapshotRegistry.swift
     blob: 88087bda544165c4d24c514a4f3e0641a620512e
   - path: Sources/PersistenceKitSQLite/SQLiteStorage.swift
-    blob: 2c73892fba5b5b4c6608dac070b1c2159f4538c6
+    blob: d4b4e9c7c3229dbfd29df0453456f7b9bd2cb9c6
   - path: Sources/PersistenceKitSQLite/KeychainKeyStore.swift
     blob: 0071732291a7cb6ce0777bd230a6188276fb4f32
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLStorage.swift
-    blob: 849926f9e6def788fae2f38757ad44bcd52a18a0
+    blob: 305d1983d13862e2f10176999aff2477eab0f28e
   - path: Sources/PersistenceKitInMemory/InMemoryStorage.swift
     blob: 9820c771bfe39ab738eea1f3b1623491fcfb1326
   - path: Sources/PersistenceKitReplication/StorageReplicator.swift
@@ -53,6 +53,7 @@ sources:
 
   <!-- Title -->
   <text x="20" y="26" font-size="15" font-weight="bold" fill="#111">PersistenceKit: one protocol, three backends, cross-cutting toolkits</text>
+  <text class="sub" x="20" y="46">v1.0.24: default disk-backed residency, mmap, and cache invalidation.</text>
 
   <!-- Calling kit -->
   <rect class="box" x="20" y="60" width="130" height="52" rx="6"/>

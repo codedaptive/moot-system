@@ -2,8 +2,8 @@
 doc: OVERVIEW
 package: QueueKit
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/QueueKit/DrainLease.swift
     blob: 3f1df6aa1fab44c993bd49d96de179ff03450303
@@ -22,12 +22,19 @@ sources:
   - path: Sources/QueueKit/QueueKit.swift
     blob: 3878243f6da8ad1b55bba5271f7502e8d6b8e3d7
   - path: Sources/QueueKit/QueueKitTelemetry.swift
-    blob: 0e656863d2c9f8e83dc13fc8b6b94ae2f25ecf06
+    blob: 7b117578b25d9e4c2df18f4a2835d987a4a893f7
   - path: Sources/QueueKit/Watcher.swift
     blob: cf2b270b9c60da34f7a25c016f8c18b6ba6149e4
 ---
 
 # QueueKit Overview
+
+## Current Release Notes
+
+Queue telemetry now separates sampling from emission.
+The latency window records every drain tick.
+Metrics are emitted at most once every 30 seconds for each estate stream.
+This keeps dashboards useful without filling the telemetry store.
 
 ## What This Library Does
 

@@ -3,8 +3,8 @@
 doc: topology
 package: QueueKit
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/QueueKit/QueueKit.swift
     blob: 3878243f6da8ad1b55bba5271f7502e8d6b8e3d7
@@ -19,7 +19,7 @@ sources:
   - path: Sources/QueueKit/Watcher.swift
     blob: cf2b270b9c60da34f7a25c016f8c18b6ba6149e4
   - path: Sources/QueueKit/QueueKitTelemetry.swift
-    blob: 0e656863d2c9f8e83dc13fc8b6b94ae2f25ecf06
+    blob: 7b117578b25d9e4c2df18f4a2835d987a4a893f7
 -->
 <svg xmlns="http://www.w3.org/2000/svg" width="940" height="600" viewBox="0 0 940 600" font-family="Helvetica, Arial, sans-serif">
   <defs>
@@ -42,6 +42,7 @@ sources:
 
   <!-- Title -->
   <text x="20" y="28" font-size="15" font-weight="bold" fill="#111">QueueKit: a job crosses a process boundary</text>
+  <text class="sub" x="20" y="46">v1.0.24: queue metrics sample every tick and emit on a 30s gate.</text>
 
   <!-- Main pipeline row -->
   <rect class="box" x="20" y="70" width="110" height="56" rx="6"/>

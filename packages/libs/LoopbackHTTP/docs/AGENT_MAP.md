@@ -2,13 +2,13 @@
 doc: AGENT_MAP
 package: LoopbackHTTP
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/LoopbackHTTP/HTTPWire.swift
     blob: c07525c2583c06aa8406287eef5cb17279b9b86a
   - path: Sources/LoopbackHTTP/POSIXSocket.swift
-    blob: 6dfba4dee7ad3121d47c8bfc937854c6f13ad1b1
+    blob: 29a9202773e71b964acc5a3ebca742c36e7cbd9f
 ---
 
 # AGENT_MAP: LoopbackHTTP
@@ -16,6 +16,10 @@ sources:
 PURPOSE: zero-dependency, loopback-pinned HTTP/1.1 server primitive (transport + wire parsing/framing only; no auth/policy). Bind loopback socket → accept → recv bytes → HTTPRequest.read parses → caller builds HTTPResponse or drives SSEStream → send/sendAll writes bytes back.
 
 DEPS: imports Foundation (HTTPWire.swift); Glibc (Linux) / Darwin (Apple) via `#if canImport(Glibc)` guard (POSIXSocket.swift). No external SwiftPM packages (zero-dependency kit rule). No rust/ port; extraction target is OS transport glue, exempt from the Swift/Rust parity discipline (ADR-LOOPBACKHTTP-001); parity for the MCP transport is enforced at the JSON-RPC wire, not here. Imported by: moot-mgr (monitor daemon dashboard read-API + control listener), resident mootx01 MCP daemon (JSON-RPC transport, SSE notifications).
+
+
+CURRENT TRUE-UP:
+- v1.0.24: accepted Darwin sockets set `SO_NOSIGPIPE`; Linux sends use `MSG_NOSIGNAL`. Peer-closed writes return failure instead of raising SIGPIPE.
 
 ENTRY POINTS (most callers need only these):
 - POSIXSocket.swift:43 `POSIXSocket.listenLoopbackTCP(port:) throws -> (fd, port)`; bind+listen, loopback-only

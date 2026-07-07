@@ -2,8 +2,8 @@
 doc: DETAILS
 package: ConvergenceKit
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/ConvergenceKit/SyncEngine.swift
     blob: 32e69e0ea5002d8b699866183371527f675023cd
@@ -14,7 +14,7 @@ sources:
   - path: Sources/ConvergenceKitCloudKit/CKRecordMapping.swift
     blob: 9b61903296533f8044bee5a4f93ca2dc1b76b653
   - path: Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift
-    blob: 7dd43ccf5454739a3d1ae1cda0870cf507c479c6
+    blob: 0ea4d12140516ad32d6edb1b910c2c0cc920c46e
   - path: Sources/ConvergenceKitFederation/FederationIdentity.swift
     blob: b64358fe36fd241049e9f5bdbbb335f1f3d29464
   - path: Sources/ConvergenceKitFederation/FederationSyncEngine.swift
@@ -26,6 +26,14 @@ sources:
 ---
 
 # ConvergenceKit Details
+
+## Current Release Details
+
+The CloudKit engine no longer writes sync meta columns into application rows.
+It reads and writes `_ck_sync_meta` by table name and primary key.
+A remote record with an older HLC is skipped.
+A newer record updates the row.
+The engine then stores its sync HLC in the side table.
 
 This document walks through every source file in the package. Read
 `OVERVIEW.md` first for the big picture. Files appear here in pipeline

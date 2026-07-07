@@ -3,13 +3,13 @@
 doc: topology
 package: ObserverSink
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/ObserverSink/PersistenceStatsSink.swift
-    blob: e76c55599795f4bc85b860a4901dc9ab04dd201f
+    blob: 103d3c53ca69aaef22d4066f11b2655ddb944252
   - path: Sources/ObserverSink/StatsStore.swift
-    blob: 483c736feffd82821a8d77030afde0e182d320fc
+    blob: 4f4d25a8eeaff0a3998721bb105519815e00eb28
 -->
 <svg xmlns="http://www.w3.org/2000/svg" width="920" height="560" viewBox="0 0 920 560" font-family="Helvetica, Arial, sans-serif">
   <defs>
@@ -31,6 +31,7 @@ sources:
 
   <!-- Title -->
   <text x="20" y="28" font-size="15" font-weight="bold" fill="#111">ObserverSink: telemetry sample in, durable row out</text>
+  <text class="sub" x="20" y="46">v1.0.24: bounded writes, monitoring default on, and v5 metric indexes.</text>
 
   <!-- Main pipeline row -->
   <rect class="box" x="20" y="70" width="140" height="52" rx="6"/>

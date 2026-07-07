@@ -3,8 +3,8 @@
 doc: topology
 package: ConvergenceKit
 repo: moot-system
-authored_commit: 909513d0a8ecb1e9e903af9f4d25b3e4f2528242
-authored_date: 2026-07-04
+authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
+authored_date: 2026-07-07
 sources:
   - path: Sources/ConvergenceKit/SyncEngine.swift
     blob: 32e69e0ea5002d8b699866183371527f675023cd
@@ -15,7 +15,7 @@ sources:
   - path: Sources/ConvergenceKitCloudKit/CKRecordMapping.swift
     blob: 9b61903296533f8044bee5a4f93ca2dc1b76b653
   - path: Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift
-    blob: 7dd43ccf5454739a3d1ae1cda0870cf507c479c6
+    blob: 0ea4d12140516ad32d6edb1b910c2c0cc920c46e
   - path: Sources/ConvergenceKitFederation/FederationSyncEngine.swift
     blob: 9bf722f8e7fc24ae12ac72d571c135da2b40af62
   - path: Sources/ConvergenceKitNone/ConvergenceKitNone.swift
@@ -41,6 +41,7 @@ sources:
 
   <!-- Title -->
   <text x="20" y="28" font-size="15" font-weight="bold" fill="#111">ConvergenceKit: PersistenceKit rows in, replicated rows out</text>
+  <text class="sub" x="20" y="46">v1.0.24: CloudKit LWW uses a sync metadata side table.</text>
 
   <!-- Main pipeline row -->
   <rect class="box" x="20" y="80" width="120" height="54" rx="6"/>
