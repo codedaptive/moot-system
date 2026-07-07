@@ -21,13 +21,19 @@
 //   11. countMetrics: COUNT(*) returns the correct row count without row decoding.
 //
 // Both-ports parity: the Rust tests in observer_sink/tests/conformance.rs exercise
-// the same six scenarios with the same table names and flag semantics.
+// the same scenarios with the same table names and flag semantics.
+//   12. v3→v4 migration: seed a v3-state DB (no dropbox index), re-open via StatsStore,
+//       assert schemaVersion==4 in _storagekit_migrations and idx_metric_samples_dropbox_id exists.
 
 import Testing
 import Foundation
 import IntellectusLib
 import PersistenceKit
 import PersistenceKitSQLite
+// SQLCipher: migration test seeds a v3 DB via the C API and verifies the
+// index after v3→v4 migration. Must be the SAME vendored engine as
+// PersistenceKitSQLite (not system SQLite3) — see Package.swift note.
+import SQLCipher
 @testable import ObserverSink
 
 // MARK: - Test helpers
@@ -57,37 +63,59 @@ struct ObserverSinkConformanceTests {
     func schemaVersion() async throws {
         let store = try await makeStore()
         defer { Task { await store.close() } }
-        // Schema version 3: topology_snapshots.topology_fingerprint added (v2→v3).
-        #expect(StatsStore.schemaVersion == 3)
+        // Schema version 5: composite idx_metric_samples_dropbox_name_ts added (v4→v5).
+        #expect(StatsStore.schemaVersion == 5)
     }
 
-    @Test("StatsStore seeds control rows on open")
+    @Test("StatsStore seeds monitoring ON by default (wave 8.1)")
     func controlRowsSeededOnOpen() async throws {
         let store = try await makeStore()
         defer { Task { await store.close() } }
 
-        // "monitoring" defaults to off.
+        // Wave 8.1: monitoring defaults to ON for new estates.
         let monitoringOn = try await store.isMonitoringEnabled()
-        #expect(monitoringOn == false)
+        #expect(monitoringOn == true)
     }
 
     // MARK: 2. Monitoring flag round-trip
 
-    @Test("Monitoring flag write-read round-trip")
+    @Test("Monitoring flag write-read round-trip (default ON)")
     func monitoringFlagRoundTrip() async throws {
         let store = try await makeStore()
         defer { Task { await store.close() } }
 
-        // Default is off.
-        #expect(try await store.isMonitoringEnabled() == false)
-
-        // Enable.
-        try await store.setMonitoringEnabled(true)
+        // Wave 8.1 default is ON.
         #expect(try await store.isMonitoringEnabled() == true)
 
         // Disable.
         try await store.setMonitoringEnabled(false)
         #expect(try await store.isMonitoringEnabled() == false)
+
+        // Re-enable.
+        try await store.setMonitoringEnabled(true)
+        #expect(try await store.isMonitoringEnabled() == true)
+    }
+
+    @Test("setMonitoringEnabled writes user source marker — prevents migration reverting it")
+    func monitoringUserSourceMarkerPreventsRevert() async throws {
+        let url = makeTempURL()
+
+        // Open fresh: monitoring=1, source=default (wave 8.1 seed).
+        let store1 = try StatsStore(url: url)
+        try await store1.open()
+        #expect(try await store1.isMonitoringEnabled() == true)
+        // User explicitly turns monitoring off.
+        try await store1.setMonitoringEnabled(false)
+        #expect(try await store1.isMonitoringEnabled() == false)
+        await store1.close()
+
+        // Re-open: the wave 8.1 migration checks source == "user" and must NOT flip back to 1.
+        let store2 = try StatsStore(url: url)
+        try await store2.open()
+        defer { Task { await store2.close() } }
+        // Source was "user" → migration skips → monitoring stays off.
+        #expect(try await store2.isMonitoringEnabled() == false,
+                "User-set monitoring=off must survive a store re-open (wave 8.1 migration must not revert it)")
     }
 
     // MARK: 3. Metric emit path
@@ -177,7 +205,9 @@ struct ObserverSinkConformanceTests {
         let store = try await makeStore()
         defer { Task { await store.close() } }
 
-        // Monitoring stays off (default).
+        // Monitoring defaults ON (wave 8.1) — turn it off explicitly to
+        // exercise the discard path.
+        try await store.setMonitoringEnabled(false)
         let dropboxID = "test-dropbox-off"
         let sink = PersistenceStatsSink(store: store, dropboxID: dropboxID)
         Intellectus.install(sink: sink)
@@ -417,10 +447,14 @@ struct ObserverSinkConformanceTests {
 
     // MARK: 12. Topology snapshot — schema version bump
 
-    @Test("StatsStore schema is version 3 after topology_fingerprint column added")
-    func schemaVersionIsThree() async throws {
-        // v1→v2 added topology_snapshots; v2→v3 added topology_fingerprint.
-        #expect(StatsStore.schemaVersion == 3)
+    @Test("StatsStore schema is version 5 after composite index added")
+    func schemaVersionIsFive() async throws {
+        // v1→v2: topology_snapshots table.
+        // v2→v3: topology_snapshots.topology_fingerprint.
+        // v3→v4: idx_metric_samples_dropbox_id (per-dropbox COUNT is now O(log n)).
+        // v4→v5: composite idx_metric_samples_dropbox_name_ts replaces the v4 index,
+        //        enabling per-(dropbox, name) ORDER BY ts DESC LIMIT 1 pure index seeks.
+        #expect(StatsStore.schemaVersion == 5)
     }
 
     // MARK: 13. Topology snapshot write and read
@@ -603,4 +637,371 @@ struct ObserverSinkConformanceTests {
         let result = try await store.latestTopologySnapshot(estate: "no-such-estate")
         #expect(result == nil, "Unknown estate must return nil")
     }
+
+    // MARK: 17. queryMetricAggregatesByDropbox — aggregate query correctness
+
+    @Test("queryMetricAggregatesByDropbox returns correct count and lastTs per dropbox")
+    func metricAggregatesByDropbox() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let idA = "dropbox-A"
+        let idB = "dropbox-B"
+        let idC = "dropbox-C"   // intentionally no rows
+
+        // Insert 3 rows for A (t=100, 200, 300) and 2 rows for B (t=50, 150).
+        // The highest ts values are 300 for A and 150 for B.
+        let tsA: [Double] = [100, 200, 300]
+        let tsB: [Double] = [50, 150]
+        for ts in tsA {
+            try await store.insertMetric(name: "m", value: 1.0, tags: [:], ts: ts, dropboxID: idA)
+        }
+        for ts in tsB {
+            try await store.insertMetric(name: "m", value: 1.0, tags: [:], ts: ts, dropboxID: idB)
+        }
+
+        let aggregates = try await store.queryMetricAggregatesByDropbox(
+            forDropboxIDs: [idA, idB, idC]
+        )
+
+        #expect(aggregates.count == 3, "Must return one aggregate per requested dropbox")
+
+        // Dropbox A: 3 rows, lastTs ISO-8601 for epoch 300.
+        let a = try #require(aggregates.first(where: { $0.dropboxID == idA }),
+                             "Aggregate for dropbox A must be present")
+        #expect(a.metricCount == 3, "Dropbox A must have 3 rows; got \(a.metricCount)")
+        #expect(a.lastMetricTs != nil, "Dropbox A lastMetricTs must be non-nil")
+
+        // Dropbox B: 2 rows.
+        let b = try #require(aggregates.first(where: { $0.dropboxID == idB }),
+                             "Aggregate for dropbox B must be present")
+        #expect(b.metricCount == 2, "Dropbox B must have 2 rows; got \(b.metricCount)")
+
+        // Dropbox C: 0 rows, lastTs nil.
+        let c = try #require(aggregates.first(where: { $0.dropboxID == idC }),
+                             "Aggregate for dropbox C must be present even with 0 rows")
+        #expect(c.metricCount == 0, "Dropbox C must have 0 rows; got \(c.metricCount)")
+        #expect(c.lastMetricTs == nil, "Dropbox C lastMetricTs must be nil when no rows exist")
+
+        // Verify that lastTs for A corresponds to the highest ts (300s epoch).
+        // ISO-8601 strings are lexicographically sortable so ts-300 > ts-100.
+        if let aTs = a.lastMetricTs, let bTs = b.lastMetricTs {
+            // epoch 300 (A) > epoch 150 (B) → A's lastTs must compare greater.
+            #expect(aTs > bTs, "lastMetricTs for A (t=300) must be newer than B (t=150); got A=\(aTs), B=\(bTs)")
+        }
+    }
+
+    @Test("queryMetricAggregatesByDropbox returns empty for empty input")
+    func metricAggregatesByDropboxEmptyInput() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let result = try await store.queryMetricAggregatesByDropbox(forDropboxIDs: [])
+        #expect(result.isEmpty, "Empty input must return empty result")
+    }
+
+    // MARK: 18. queryLatestMetricsByNamesAndDropboxes — per-pair latest-row query
+
+    /// 10k rows across 4 (name, dropboxID) pairs — result count must equal 4,
+    /// not 10k. This is the core correctness proof for the estatesPayload fix:
+    /// the method returns the LATEST row per group, not all rows.
+    @Test("queryLatestMetricsByNamesAndDropboxes returns one row per group, not table size")
+    func latestMetricsByNamesAndDropboxesGroupCount() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        // Seed 10k rows across 2 names × 2 dropboxes (2500 rows per pair).
+        // Row timestamps are sequential (ts=1, 2, ..., 10000).
+        // The most-recent row per (name, dropboxID) is the one with the highest ts.
+        let names: [String] = ["metric.a", "metric.b"]
+        let dropboxes: [String] = ["dropbox-1", "dropbox-2"]
+        var ts = 1.0
+        let rowsPerGroup = 2_500
+        for name in names {
+            for dropbox in dropboxes {
+                for _ in 0..<rowsPerGroup {
+                    try await store.insertMetric(
+                        name: name, value: ts, tags: ["group": "\(name):\(dropbox)"],
+                        ts: ts, dropboxID: dropbox
+                    )
+                    ts += 1
+                }
+            }
+        }
+
+        let result = try await store.queryLatestMetricsByNamesAndDropboxes(
+            Set(names), dropboxIDs: dropboxes
+        )
+
+        // Must return exactly 4 rows (one per group), not 10k.
+        #expect(
+            result.count == names.count * dropboxes.count,
+            "Must return one row per (name, dropboxID) pair; got \(result.count)"
+        )
+
+        // Verify each row is the LATEST (highest ts) for its group.
+        // The last row inserted for each (name, dropboxID) has the highest value.
+        for name in names {
+            for dropbox in dropboxes {
+                let row = result.first(where: { $0.name == name && $0.dropboxID == dropbox })
+                let r = try #require(row, "Row for (\(name), \(dropbox)) must be present")
+                // Each group's last insert has value = ts of that insert (the max for the group).
+                // Group rows were inserted in batches so the max ts for (name, dropbox) is
+                // not trivially predictable by index — assert the row has the highest ts for
+                // that group rather than a specific constant.
+                let allForGroup = try await store.queryMetricsByNames(Set([name]), dropboxID: dropbox)
+                let maxTs = allForGroup.max(by: { $0.ts < $1.ts })?.ts
+                #expect(r.ts == maxTs, "Latest row for (\(name), \(dropbox)) must have max ts; got \(r.ts)")
+            }
+        }
+    }
+
+    @Test("queryLatestMetricsByNamesAndDropboxes returns empty for empty inputs")
+    func latestMetricsByNamesAndDropboxesEmptyInputs() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let emptyNames = try await store.queryLatestMetricsByNamesAndDropboxes(
+            [], dropboxIDs: ["dropbox-1"]
+        )
+        #expect(emptyNames.isEmpty, "Empty names must yield empty result")
+
+        let emptyDropboxes = try await store.queryLatestMetricsByNamesAndDropboxes(
+            ["metric.a"], dropboxIDs: []
+        )
+        #expect(emptyDropboxes.isEmpty, "Empty dropboxIDs must yield empty result")
+    }
+
+    // MARK: 20. v3 / v4 migration tests
+
+    /// Seed a database at v3 (all StatsStore tables present up through
+    /// topology_fingerprint, but WITHOUT idx_metric_samples_dropbox_id).
+    /// Uses the same vendored SQLCipher engine as PersistenceKitSQLite —
+    /// opening an unencrypted DB with SQLCipher is always valid (no-key mode).
+    private func seedV3Database(at url: URL) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK, let db else {
+            throw StatsStoreTestError.seedFailed("could not open seed DB at \(url.path)")
+        }
+        defer { sqlite3_close(db) }
+
+        // All DDL statements that represent the v3 state of ObserverSink:
+        //   - _storagekit_migrations table + v3 version row
+        //   - metric_samples, event_samples, control (v1 tables)
+        //   - topology_snapshots with topology_fingerprint column (v2+v3)
+        //   - idx_metric_samples_ts, idx_event_samples_ts (v1 indexes)
+        //   - NO idx_metric_samples_dropbox_id (added by v3→v4)
+        let statements: [String] = [
+            """
+            CREATE TABLE "_storagekit_migrations" (
+              "kit_id" TEXT NOT NULL,
+              "version" INTEGER NOT NULL,
+              "applied_at" TEXT NOT NULL,
+              PRIMARY KEY ("kit_id")
+            )
+            """,
+            "INSERT INTO \"_storagekit_migrations\" (\"kit_id\", \"version\", \"applied_at\") VALUES ('ObserverSink', 3, '2026-01-01T00:00:00Z')",
+            """
+            CREATE TABLE "metric_samples" (
+              "row_id" TEXT NOT NULL,
+              "name" TEXT NOT NULL,
+              "value" REAL NOT NULL,
+              "tags" TEXT NOT NULL,
+              "ts" TEXT NOT NULL,
+              "dropbox_id" TEXT NOT NULL,
+              PRIMARY KEY ("row_id")
+            )
+            """,
+            """
+            CREATE TABLE "event_samples" (
+              "row_id" TEXT NOT NULL,
+              "kind" TEXT NOT NULL,
+              "noun_type" INTEGER NOT NULL,
+              "estate_row_id" TEXT NOT NULL,
+              "estate" TEXT NOT NULL,
+              "ts" TEXT NOT NULL,
+              "dropbox_id" TEXT NOT NULL,
+              PRIMARY KEY ("row_id")
+            )
+            """,
+            """
+            CREATE TABLE "control" (
+              "key" TEXT NOT NULL,
+              "value" TEXT NOT NULL,
+              PRIMARY KEY ("key")
+            )
+            """,
+            // topology_snapshots was added in v2; topology_fingerprint column in v3.
+            """
+            CREATE TABLE "topology_snapshots" (
+              "estate" TEXT NOT NULL,
+              "generated_at" TEXT NOT NULL,
+              "payload" TEXT NOT NULL,
+              "topology_fingerprint" TEXT,
+              PRIMARY KEY ("estate")
+            )
+            """,
+            // v1 indexes only — dropbox_id index is deliberately absent.
+            "CREATE INDEX \"idx_metric_samples_ts\" ON \"metric_samples\" (\"ts\")",
+            "CREATE INDEX \"idx_event_samples_ts\" ON \"event_samples\" (\"ts\")",
+        ]
+
+        for sql in statements {
+            var errmsg: UnsafeMutablePointer<CChar>?
+            let rc = sqlite3_exec(db, sql, nil, nil, &errmsg)
+            if rc != SQLITE_OK {
+                let msg = errmsg.map { String(cString: $0) } ?? "rc=\(rc)"
+                sqlite3_free(errmsg)
+                throw StatsStoreTestError.seedFailed("DDL failed: \(msg) — \(sql.prefix(60))")
+            }
+        }
+    }
+
+    /// Seed a database at v4 (all v3 tables plus idx_metric_samples_dropbox_id,
+    /// version row = 4). Used by v4→v5 migration test.
+    private func seedV4Database(at url: URL) throws {
+        // Start from v3 state.
+        try seedV3Database(at: url)
+
+        // Advance to v4: update version + add the single-column dropbox_id index.
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK, let db else {
+            throw StatsStoreTestError.seedFailed("could not open v4 seed DB at \(url.path)")
+        }
+        defer { sqlite3_close(db) }
+
+        let statements: [String] = [
+            "UPDATE \"_storagekit_migrations\" SET version = 4, applied_at = '2026-01-02T00:00:00Z' WHERE kit_id = 'ObserverSink'",
+            "CREATE INDEX \"idx_metric_samples_dropbox_id\" ON \"metric_samples\" (\"dropbox_id\")",
+        ]
+        for sql in statements {
+            var errmsg: UnsafeMutablePointer<CChar>?
+            let rc = sqlite3_exec(db, sql, nil, nil, &errmsg)
+            if rc != SQLITE_OK {
+                let msg = errmsg.map { String(cString: $0) } ?? "rc=\(rc)"
+                sqlite3_free(errmsg)
+                throw StatsStoreTestError.seedFailed("v4 seed DDL failed: \(msg) — \(sql.prefix(60))")
+            }
+        }
+    }
+
+    /// Verify that opening an existing v3 database through StatsStore applies
+    /// the full migration chain (v3→v4→v5): the stored version advances to 5,
+    /// the old single-column index is replaced by the composite index.
+    @Test("v3 db migrates to v5 through full chain — composite index present, old index absent")
+    func v3DatabaseMigratesToV5() async throws {
+        let url = makeTempURL()
+
+        // Build the v3 seed DB.
+        try seedV3Database(at: url)
+
+        // Open via StatsStore — the migration runner applies v3→v4 then v4→v5.
+        let store = try StatsStore(url: url)
+        try await store.open()
+        await store.close()
+
+        // Re-open with raw SQLCipher to inspect the final DB state.
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK, let db else {
+            Issue.record("could not re-open seed DB at \(url.path) for verification")
+            return
+        }
+        defer { sqlite3_close(db) }
+
+        // 1. Version must be 5.
+        var storedVersion: Int32 = 0
+        let verSQL = "SELECT version FROM \"_storagekit_migrations\" WHERE kit_id = 'ObserverSink'"
+        var vStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, verSQL, -1, &vStmt, nil) == SQLITE_OK,
+           sqlite3_step(vStmt) == SQLITE_ROW {
+            storedVersion = sqlite3_column_int(vStmt, 0)
+        }
+        sqlite3_finalize(vStmt)
+        #expect(storedVersion == 5, "v3 db migrated through chain must reach version 5; got \(storedVersion)")
+
+        // 2. Composite index must be present.
+        var compositeFound = false
+        let compSQL = "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_name_ts'"
+        var cStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, compSQL, -1, &cStmt, nil) == SQLITE_OK,
+           sqlite3_step(cStmt) == SQLITE_ROW {
+            compositeFound = true
+        }
+        sqlite3_finalize(cStmt)
+        #expect(compositeFound, "composite index idx_metric_samples_dropbox_name_ts must exist after v3→v5 chain")
+
+        // 3. Old single-column index must be gone (dropped by v4→v5 migration).
+        var oldIndexGone = true
+        let oldSQL = "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_id'"
+        var oStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, oldSQL, -1, &oStmt, nil) == SQLITE_OK,
+           sqlite3_step(oStmt) == SQLITE_ROW {
+            oldIndexGone = false
+        }
+        sqlite3_finalize(oStmt)
+        #expect(oldIndexGone, "old index idx_metric_samples_dropbox_id must be dropped by v4→v5 migration")
+    }
+
+    /// Verify that opening an existing v4 database through StatsStore applies
+    /// the v4→v5 migration: advances the stored version to 5, drops the
+    /// single-column index, and creates the composite index.
+    @Test("v4→v5 migration drops old index and adds composite index")
+    func v4ToV5MigrationAddsCompositeIndex() async throws {
+        let url = makeTempURL()
+
+        // Build the v4 seed DB (v3 base + single-column dropbox_id index, version=4).
+        try seedV4Database(at: url)
+
+        // Open via StatsStore — the migration runner detects version=4 < 5
+        // and applies the v4→v5 step (DROP INDEX + CREATE INDEX + version upsert).
+        let store = try StatsStore(url: url)
+        try await store.open()
+        await store.close()
+
+        // Re-open with raw SQLCipher to inspect the migrated DB state.
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK, let db else {
+            Issue.record("could not re-open v4 seed DB at \(url.path) for verification")
+            return
+        }
+        defer { sqlite3_close(db) }
+
+        // 1. Version must now be 5.
+        var storedVersion: Int32 = 0
+        let verSQL = "SELECT version FROM \"_storagekit_migrations\" WHERE kit_id = 'ObserverSink'"
+        var vStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, verSQL, -1, &vStmt, nil) == SQLITE_OK,
+           sqlite3_step(vStmt) == SQLITE_ROW {
+            storedVersion = sqlite3_column_int(vStmt, 0)
+        }
+        sqlite3_finalize(vStmt)
+        #expect(storedVersion == 5, "v4→v5 migration must record version 5 in _storagekit_migrations; got \(storedVersion)")
+
+        // 2. Composite index must be present after migration.
+        var compositeFound = false
+        let compSQL = "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_name_ts'"
+        var cStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, compSQL, -1, &cStmt, nil) == SQLITE_OK,
+           sqlite3_step(cStmt) == SQLITE_ROW {
+            compositeFound = true
+        }
+        sqlite3_finalize(cStmt)
+        #expect(compositeFound, "v4→v5 migration must create idx_metric_samples_dropbox_name_ts")
+
+        // 3. Old single-column index must be absent after migration.
+        var oldIndexGone = true
+        let oldSQL = "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_id'"
+        var oStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, oldSQL, -1, &oStmt, nil) == SQLITE_OK,
+           sqlite3_step(oStmt) == SQLITE_ROW {
+            oldIndexGone = false
+        }
+        sqlite3_finalize(oStmt)
+        #expect(oldIndexGone, "v4→v5 migration must drop idx_metric_samples_dropbox_id")
+    }
+}
+
+// Error type scoped to this test file to avoid clashing with production errors.
+private enum StatsStoreTestError: Error {
+    case seedFailed(String)
 }

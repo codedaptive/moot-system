@@ -46,7 +46,9 @@ private struct PendingFaultBackend: QueueBackend {
     func completed(streamID: StreamID?) async throws -> [Job] { [] }
 }
 
-@Suite("QueueKitTelemetry fail-closed depth (P0-5 site 7)")
+// Tests in this suite mutate the Intellectus singleton (sink + enabled flag).
+// .serialized prevents concurrent tests from racing on that shared global state.
+@Suite("QueueKitTelemetry fail-closed depth (P0-5 site 7)", .serialized)
 struct QueueKitTelemetryFailClosedTests {
 
     /// Install a capturing sink, run reportQueueStats, return the emitted
@@ -104,6 +106,39 @@ struct QueueKitTelemetryFailClosedTests {
         #expect(
             !names.contains("queue.depth_unavailable"),
             "a successful read must NOT emit queue.depth_unavailable; got \(names)"
+        )
+    }
+
+    /// When monitoring is disabled (Intellectus.isEnabled == false), reportQueueStats
+    /// must return immediately — zero samples emitted, even when the throttle interval
+    /// (now=99_999.0 >> lastEpoch=0.0) would otherwise allow emission.
+    @Test("monitoring disabled — reportQueueStats emits zero samples")
+    func monitoringDisabledEmitsNoSamples() async {
+        let sink = RecentWindowSink(capacity: 64)
+        Intellectus.install(sink: sink)
+        Intellectus.setEnabled(false)
+        defer {
+            Intellectus.setEnabled(false)
+            Intellectus.install(sink: NoOpSink.shared)
+        }
+
+        let window = QueueLatencyWindowBox(capacity: 16)
+        let backend = PendingFaultBackend(failPending: false, pending: 3)
+        // Use a far-future `now` so the throttle interval check would pass if
+        // monitoring were enabled — confirming the gate fires before the throttle.
+        await reportQueueStats(
+            backend: backend,
+            drained: [],
+            drainStart: 0.0,
+            now: 99_999.0,
+            estateTag: "test-estate",
+            window: window
+        )
+
+        let samples = sink.snapshot()
+        #expect(
+            samples.isEmpty,
+            "monitoring disabled must produce zero samples; got \(samples.count)"
         )
     }
 }

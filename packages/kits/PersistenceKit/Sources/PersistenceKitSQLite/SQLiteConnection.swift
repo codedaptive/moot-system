@@ -72,7 +72,17 @@ final class SQLiteConnection: @unchecked Sendable {
         // the 32 raw bytes directly as the cipher key (no passphrase KDF — the
         // key is already full-entropy). Mirrors the Rust SqliteStorage chokepoint.
         if let keyHex {
-            try exec("PRAGMA key = \"x'\(keyHex)'\";")
+            // Execute the key PRAGMA directly instead of through exec() so
+            // that a failure does not leak the hex key material in the error
+            // message (exec interpolates the SQL into StorageError).
+            let keySql = "PRAGMA key = \"x'\(keyHex)'\";"
+            var keyErrMsg: UnsafeMutablePointer<CChar>? = nil
+            let keyRc = sqlite3_exec(handle, keySql, nil, nil, &keyErrMsg)
+            if keyRc != SQLITE_OK {
+                let msg = keyErrMsg.map { String(cString: $0) } ?? "key pragma failed"
+                if let keyErrMsg { sqlite3_free(keyErrMsg) }
+                throw StorageError.backendError(underlying: "PRAGMA key failed: \(msg)")
+            }
         }
 
         // Apple Data Protection: the OS stores the estate encrypted at rest
@@ -84,6 +94,19 @@ final class SQLiteConnection: @unchecked Sendable {
         // otherwise request via NSPersistentStoreFileProtectionKey.
         Self.applyDataProtection(to: url)
 
+        // Lock database files to owner-only (0600). The default SQLite
+        // creation mode is 0644 (world-readable), which lets any process read
+        // the file with sqlite3. 0600 blocks other users; for same-user AI
+        // agent subprocesses, the instruction-file prohibition ("NEVER touch
+        // the database directly") is the primary defense, and SQLCipher
+        // (Mode 3) makes raw reads return ciphertext. The permissions cover
+        // the main DB, WAL, and SHM files.
+        for suffix in ["", "-wal", "-shm"] {
+            let path = url.path + suffix
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: path)
+        }
+
         // WAL mode and busy timeout.
         // Durability pragmas per SQLiteDurabilityTail (cookbook § 4.3.3):
         // WAL for crash-safe concurrent reads, NORMAL fsync,
@@ -93,6 +116,15 @@ final class SQLiteConnection: @unchecked Sendable {
         try exec("PRAGMA wal_autocheckpoint = 1000;")
         try exec("PRAGMA busy_timeout = \(Int(busyTimeout * 1000));")
         try exec("PRAGMA foreign_keys = ON;")
+        // ADR-026: memory-map the database file so SQLite reads go through
+        // the OS page cache instead of malloc'd copies. This is the single
+        // change that eliminates multi-GB heap allocations for vector BLOBs
+        // and BM25 term-frequency reads — the OS manages which pages are
+        // resident in physical RAM based on actual access patterns. 2GB
+        // mmap window covers any realistic estate size; pages beyond the
+        // window fall back to normal read() I/O. Compatible with WAL mode
+        // and SQLCipher (mmap applies after decryption).
+        try exec("PRAGMA mmap_size = 2147483648;")
     }
 
     deinit {

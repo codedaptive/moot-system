@@ -2,7 +2,7 @@
 //
 // Both-ports conformance tests for ObserverSink (Rust port).
 //
-// Mirrors ObserverSinkConformanceTests.swift exactly — same twelve scenarios:
+// Mirrors ObserverSinkConformanceTests.swift exactly — same thirteen scenarios:
 //   1. Schema/open — schema version correct.
 //   2. Control rows seeded on open — monitoring defaults to off.
 //   3. Monitoring flag write-read round-trip.
@@ -17,12 +17,14 @@
 //       (regression lock for the seed-if-absent fix — seed-if-absent must NOT
 //        overwrite an operator-set "monitoring"="1" on reopen)
 //  12. storageStats reports the SQLite-backed store's own DB-layer health.
+//  13. Migration tests: v3 db migrates to v5 (full chain), v4→v5 migration drops
+//      old single-column index and creates composite idx_metric_samples_dropbox_name_ts.
 //
 // Schema parity with Swift:
 //   Same table names, same column names, same TEXT (ISO-8601) timestamp format.
 //   Timestamp comparisons use 1-second tolerance (millisecond encoding rounding).
 
-use observer_sink::{PersistenceStatsSink, StatsStore};
+use observer_sink::{PersistenceStatsSink, StatsStore, DropboxMetricAggregate, MetricRow};
 use intellectus_lib::{EventKind, Intellectus, StatSample};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -64,19 +66,47 @@ fn make_store() -> Arc<StatsStore> {
 
 #[test]
 fn schema_version() {
-    // Schema version 3: topology_snapshots.topology_fingerprint added (v2→v3).
-    assert_eq!(StatsStore::SCHEMA_VERSION, 3);
+    // Schema version 5: composite idx_metric_samples_dropbox_name_ts added (v4→v5).
+    assert_eq!(StatsStore::SCHEMA_VERSION, 5);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. Control rows seeded on open
+// 2. Control rows seeded on open — wave 8.1: monitoring defaults ON
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
 fn control_rows_seeded_on_open() {
     let store = make_store();
     let monitoring_on = store.is_monitoring_enabled().expect("is_monitoring_enabled");
-    assert!(!monitoring_on, "Expected monitoring off by default");
+    // Wave 8.1: monitoring defaults to ON for new estates.
+    assert!(monitoring_on, "Expected monitoring ON by default (wave 8.1)");
+}
+
+/// Wave 8.1: setMonitoringEnabled writes monitoring_source="user" so the
+/// one-time migration in open() never reverts an explicit operator choice.
+#[test]
+fn monitoring_user_source_marker_prevents_revert() {
+    // Open a named path so we can re-open it and test migration.
+    let path = make_temp_path();
+    let store1 = StatsStore::new(&path).expect("StatsStore::new");
+    store1.open().expect("open");
+
+    // Fresh estate: monitoring defaults ON, source=default.
+    assert!(store1.is_monitoring_enabled().expect("is_monitoring_enabled"));
+
+    // Operator explicitly turns monitoring off → source becomes "user".
+    store1.set_monitoring_enabled(false).expect("set false");
+    assert!(!store1.is_monitoring_enabled().expect("is_monitoring_enabled"));
+    store1.close().expect("close");
+
+    // Re-open: migration must NOT flip monitoring back to "1" because source="user".
+    let store2 = StatsStore::new(&path).expect("StatsStore::new");
+    store2.open().expect("open");
+    assert!(
+        !store2.is_monitoring_enabled().expect("is_monitoring_enabled"),
+        "User-set monitoring=off must survive a store re-open (wave 8.1 migration must not revert it)"
+    );
+    store2.close().expect("close");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -87,16 +117,16 @@ fn control_rows_seeded_on_open() {
 fn monitoring_flag_round_trip() {
     let store = make_store();
 
-    // Default: off.
-    assert!(!store.is_monitoring_enabled().unwrap());
-
-    // Enable.
-    store.set_monitoring_enabled(true).unwrap();
-    assert!(store.is_monitoring_enabled().unwrap());
+    // Wave 8.1 default: ON.
+    assert!(store.is_monitoring_enabled().unwrap(), "Expected monitoring ON by default (wave 8.1)");
 
     // Disable.
     store.set_monitoring_enabled(false).unwrap();
     assert!(!store.is_monitoring_enabled().unwrap());
+
+    // Re-enable.
+    store.set_monitoring_enabled(true).unwrap();
+    assert!(store.is_monitoring_enabled().unwrap());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -198,7 +228,8 @@ fn sink_discards_when_monitoring_off() {
     let _lock = INTELLECTUS_TEST_LOCK.lock().unwrap();
 
     let store = make_store();
-    // monitoring stays off (default)
+    // Wave 8.1: monitoring defaults ON — disable explicitly to exercise the discard path.
+    store.set_monitoring_enabled(false).expect("set_monitoring_enabled(false)");
 
     let dropbox_id = "rust-test-dropbox-off";
     let sink = Arc::new(PersistenceStatsSink::new(Arc::clone(&store), dropbox_id.to_string()));
@@ -352,26 +383,26 @@ fn monitoring_flag_survives_reopen() {
         let store = StatsStore::new(&path).expect("StatsStore::new (first open)");
         store.open().expect("open (first open)");
 
-        // Default is off.
-        assert!(!store.is_monitoring_enabled().unwrap(), "Default must be off");
+        // Wave 8.1: default is ON.
+        assert!(store.is_monitoring_enabled().unwrap(), "Wave 8.1: default must be ON");
 
-        // Operator sets it to ON.
-        store.set_monitoring_enabled(true).unwrap();
-        assert!(store.is_monitoring_enabled().unwrap(), "Must be on after set");
+        // Operator turns it OFF — source becomes "user", migration must not flip it back.
+        store.set_monitoring_enabled(false).unwrap();
+        assert!(!store.is_monitoring_enabled().unwrap(), "Must be off after set");
 
         // Close — simulates process restart boundary.
         store.close().expect("close");
     }
 
-    // Second open: seed-if-absent must preserve the "1" the operator set.
+    // Second open: seed-if-absent + migration must preserve the operator's "0".
     {
         let store = StatsStore::new(&path).expect("StatsStore::new (reopen)");
         store.open().expect("open (reopen)");
 
-        // The monitoring flag must still be "1" — not reset to "0" by open().
+        // The monitoring flag must still be "0" — migration must not revert operator's choice.
         assert!(
-            store.is_monitoring_enabled().unwrap(),
-            "Monitoring flag must survive a close/reopen cycle (seed-if-absent)"
+            !store.is_monitoring_enabled().unwrap(),
+            "Operator-set monitoring=off must survive a close/reopen cycle (wave 8.1 migration guard)"
         );
     }
 }
@@ -660,4 +691,335 @@ fn topology_snapshot_none_estate_empty_store() {
         .latest_topology_snapshot(None)
         .expect("query must not error");
     assert!(result.is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query_metric_aggregates_by_dropbox — aggregate query (v4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn metric_aggregates_by_dropbox_correctness() {
+    let store = make_store();
+
+    // Insert 3 rows for dropbox-A (ts=100s,200s,300s) and 2 rows for dropbox-B
+    // (ts=50s,150s). dropbox-C receives no rows.
+    let ts_a = [100.0_f64, 200.0, 300.0];
+    let ts_b = [50.0_f64, 150.0];
+    for &ts in &ts_a {
+        store
+            .insert_metric("m", 1.0, &BTreeMap::new(), ts, "dropbox-A")
+            .expect("insert must succeed");
+    }
+    for &ts in &ts_b {
+        store
+            .insert_metric("m", 1.0, &BTreeMap::new(), ts, "dropbox-B")
+            .expect("insert must succeed");
+    }
+
+    let aggs = store
+        .query_metric_aggregates_by_dropbox(&["dropbox-A", "dropbox-B", "dropbox-C"])
+        .expect("aggregate query must not error");
+
+    assert_eq!(aggs.len(), 3, "must return one aggregate per requested ID");
+
+    let a = aggs.iter().find(|x| x.dropbox_id == "dropbox-A").expect("A must be present");
+    assert_eq!(a.metric_count, 3, "dropbox-A must have 3 rows");
+    assert!(a.last_metric_ts.is_some(), "dropbox-A last_metric_ts must be Some");
+
+    let b = aggs.iter().find(|x| x.dropbox_id == "dropbox-B").expect("B must be present");
+    assert_eq!(b.metric_count, 2, "dropbox-B must have 2 rows");
+
+    let c = aggs.iter().find(|x| x.dropbox_id == "dropbox-C").expect("C must be present");
+    assert_eq!(c.metric_count, 0, "dropbox-C must have 0 rows (no inserts)");
+    assert!(c.last_metric_ts.is_none(), "dropbox-C last_metric_ts must be None");
+
+    // ISO-8601 strings are lexicographically sortable: A's newest (t=300) > B's newest (t=150).
+    let a_ts = a.last_metric_ts.as_deref().unwrap();
+    let b_ts = b.last_metric_ts.as_deref().unwrap();
+    assert!(a_ts > b_ts, "A last_ts (t=300) must be newer than B last_ts (t=150); got A={a_ts}, B={b_ts}");
+}
+
+#[test]
+fn metric_aggregates_empty_input_returns_empty() {
+    let store = make_store();
+    let aggs = store
+        .query_metric_aggregates_by_dropbox(&[])
+        .expect("empty input must succeed");
+    assert!(aggs.is_empty(), "empty input must yield empty output");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query_latest_metrics_by_names_and_dropboxes — per-pair latest-row query
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn latest_metrics_by_names_and_dropboxes_group_count() {
+    let store = make_store();
+
+    // Seed 10k rows across 2 names × 2 dropboxes (2500 rows per pair).
+    // Timestamps are sequential (ts=1.0, 2.0, ..., 10000.0).
+    let names = ["metric.a", "metric.b"];
+    let dropboxes = ["dropbox-1", "dropbox-2"];
+    let mut ts = 1.0_f64;
+    for name in &names {
+        for dropbox in &dropboxes {
+            for _ in 0..2_500_usize {
+                store
+                    .insert_metric(name, ts, &BTreeMap::new(), ts, dropbox)
+                    .expect("insert must succeed");
+                ts += 1.0;
+            }
+        }
+    }
+
+    let result = store
+        .query_latest_metrics_by_names_and_dropboxes(&names, &dropboxes)
+        .expect("query must succeed");
+
+    // Must return exactly 4 rows (one per group), not 10k.
+    assert_eq!(
+        result.len(),
+        names.len() * dropboxes.len(),
+        "must return one row per (name, dropboxID) pair; got {}",
+        result.len()
+    );
+
+    // Verify each row is the LATEST (highest ts) for its group.
+    for name in &names {
+        for dropbox in &dropboxes {
+            let row = result.iter().find(|r| r.name == *name && r.dropbox_id == *dropbox)
+                .unwrap_or_else(|| panic!("row for ({name}, {dropbox}) must be present"));
+            // The max ts for this group is the last row inserted for (name, dropbox).
+            // Rows within one group share sequential timestamps; find the group's max.
+            let all = store
+                .query_metrics_by_names(&[name], Some(dropbox))
+                .expect("group query must succeed");
+            let max_ts = all.iter().map(|r| r.ts_epoch).fold(f64::NEG_INFINITY, f64::max);
+            assert!(
+                (row.ts_epoch - max_ts).abs() < 1e-6,
+                "latest row for ({name}, {dropbox}) must have max ts_epoch {max_ts}; got {}",
+                row.ts_epoch
+            );
+        }
+    }
+}
+
+#[test]
+fn latest_metrics_by_names_and_dropboxes_empty_inputs() {
+    let store = make_store();
+    let empty_names: Vec<MetricRow> = store
+        .query_latest_metrics_by_names_and_dropboxes(&[], &["dropbox-1"])
+        .expect("empty names must succeed");
+    assert!(empty_names.is_empty(), "empty names must yield empty result");
+
+    let empty_dropboxes: Vec<MetricRow> = store
+        .query_latest_metrics_by_names_and_dropboxes(&["metric.a"], &[])
+        .expect("empty dropboxes must succeed");
+    assert!(empty_dropboxes.is_empty(), "empty dropboxes must yield empty result");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 13. v3 / v4 migration tests
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Seed a SQLite file at `path` with the v3 state of StatsStore:
+///   - _storagekit_migrations with kitID="ObserverSink", version=3
+///   - metric_samples, event_samples, control, topology_snapshots tables
+///   - idx_metric_samples_ts, idx_event_samples_ts indexes
+///   - Deliberately omits idx_metric_samples_dropbox_id (added by v3→v4)
+///
+/// Uses the same vendored SQLCipher engine as persistence-kit (no-key mode =
+/// plaintext). The `rusqlite` dev-dependency is pinned to the same version +
+/// features as persistence-kit to ensure Cargo deduplicates to one C library.
+fn seed_v3_database(path: &str) {
+    use rusqlite::Connection;
+    let conn = Connection::open(path).expect("seed: could not open DB");
+    let stmts: &[&str] = &[
+        r#"CREATE TABLE "_storagekit_migrations" (
+          "kit_id" TEXT NOT NULL,
+          "version" INTEGER NOT NULL,
+          "applied_at" TEXT NOT NULL,
+          PRIMARY KEY ("kit_id")
+        )"#,
+        r#"INSERT INTO "_storagekit_migrations" ("kit_id", "version", "applied_at")
+           VALUES ('ObserverSink', 3, '2026-01-01T00:00:00Z')"#,
+        r#"CREATE TABLE "metric_samples" (
+          "row_id" TEXT NOT NULL,
+          "name" TEXT NOT NULL,
+          "value" REAL NOT NULL,
+          "tags" TEXT NOT NULL,
+          "ts" TEXT NOT NULL,
+          "dropbox_id" TEXT NOT NULL,
+          PRIMARY KEY ("row_id")
+        )"#,
+        r#"CREATE TABLE "event_samples" (
+          "row_id" TEXT NOT NULL,
+          "kind" TEXT NOT NULL,
+          "noun_type" INTEGER NOT NULL,
+          "estate_row_id" TEXT NOT NULL,
+          "estate" TEXT NOT NULL,
+          "ts" TEXT NOT NULL,
+          "dropbox_id" TEXT NOT NULL,
+          PRIMARY KEY ("row_id")
+        )"#,
+        r#"CREATE TABLE "control" (
+          "key" TEXT NOT NULL,
+          "value" TEXT NOT NULL,
+          PRIMARY KEY ("key")
+        )"#,
+        // topology_snapshots added in v2; topology_fingerprint column added in v3.
+        r#"CREATE TABLE "topology_snapshots" (
+          "estate" TEXT NOT NULL,
+          "generated_at" TEXT NOT NULL,
+          "payload" TEXT NOT NULL,
+          "topology_fingerprint" TEXT,
+          PRIMARY KEY ("estate")
+        )"#,
+        // v1 indexes only — idx_metric_samples_dropbox_id intentionally absent.
+        r#"CREATE INDEX "idx_metric_samples_ts" ON "metric_samples" ("ts")"#,
+        r#"CREATE INDEX "idx_event_samples_ts" ON "event_samples" ("ts")"#,
+    ];
+    for sql in stmts {
+        conn.execute_batch(sql)
+            .unwrap_or_else(|e| panic!("seed DDL failed: {e}\nSQL: {sql}"));
+    }
+}
+
+/// Seed a v4 database (v3 base + single-column dropbox_id index, version=4).
+/// Used by the v4→v5 migration test.
+fn seed_v4_database(path: &str) {
+    // Start from v3 state.
+    seed_v3_database(path);
+
+    // Advance to v4: update version + add single-column dropbox_id index.
+    use rusqlite::Connection;
+    let conn = Connection::open(path).expect("seed_v4: could not open DB");
+    conn.execute_batch(
+        r#"UPDATE "_storagekit_migrations" SET version = 4, applied_at = '2026-01-02T00:00:00Z' WHERE kit_id = 'ObserverSink'"#,
+    )
+    .expect("seed_v4: version update failed");
+    conn.execute_batch(
+        r#"CREATE INDEX "idx_metric_samples_dropbox_id" ON "metric_samples" ("dropbox_id")"#,
+    )
+    .expect("seed_v4: index creation failed");
+}
+
+#[test]
+fn v3_database_migrates_to_v5() {
+    let path = make_temp_path();
+
+    // Build the v3 seed DB — no dropbox index, version=3 recorded.
+    seed_v3_database(&path);
+
+    // Open via StatsStore — apply_schema applies the full v3→v4→v5 chain.
+    let store = StatsStore::new(&path).expect("StatsStore::new must succeed on v3 seed");
+    store.open().expect("StatsStore::open must run v3→v4→v5 migration chain");
+    drop(store);
+
+    use rusqlite::Connection;
+    let conn = Connection::open(&path).expect("verification: could not re-open DB");
+
+    // 1. Version must be 5.
+    let stored_version: i64 = conn
+        .query_row(
+            r#"SELECT "version" FROM "_storagekit_migrations" WHERE "kit_id" = 'ObserverSink'"#,
+            [],
+            |row| row.get(0),
+        )
+        .expect("version query must succeed");
+    assert_eq!(
+        stored_version, 5,
+        "v3 db migrated through chain must reach version 5; got {stored_version}"
+    );
+
+    // 2. Composite index must be present.
+    let composite_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_name_ts'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("sqlite_master query must succeed");
+    assert_eq!(
+        composite_count, 1,
+        "composite index idx_metric_samples_dropbox_name_ts must exist after v3→v5 chain"
+    );
+
+    // 3. Old single-column index must be absent (dropped by v4→v5).
+    let old_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("sqlite_master query must succeed");
+    assert_eq!(
+        old_count, 0,
+        "old index idx_metric_samples_dropbox_id must be dropped by v4→v5 migration; found {old_count}"
+    );
+}
+
+#[test]
+fn v4_to_v5_migration_adds_composite_index() {
+    let path = make_temp_path();
+
+    // Build the v4 seed DB (v3 base + single-column index, version=4).
+    seed_v4_database(&path);
+
+    // Open via StatsStore — apply_schema detects version=4, drops old index,
+    // creates composite, then upserts version=5 in _storagekit_migrations.
+    let store = StatsStore::new(&path).expect("StatsStore::new must succeed on v4 seed");
+    store.open().expect("StatsStore::open must run v4→v5 migration");
+    drop(store);
+
+    use rusqlite::Connection;
+    let conn = Connection::open(&path).expect("verification: could not re-open DB");
+
+    // 1. Version must now be 5.
+    let stored_version: i64 = conn
+        .query_row(
+            r#"SELECT "version" FROM "_storagekit_migrations" WHERE "kit_id" = 'ObserverSink'"#,
+            [],
+            |row| row.get(0),
+        )
+        .expect("version query must succeed");
+    assert_eq!(
+        stored_version, 5,
+        "v4→v5 migration must record version 5 in _storagekit_migrations; got {stored_version}"
+    );
+
+    // 2. Composite index must be present.
+    let composite_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_name_ts'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("sqlite_master query must succeed");
+    assert_eq!(
+        composite_count, 1,
+        "v4→v5 migration must create idx_metric_samples_dropbox_name_ts; found {composite_count}"
+    );
+
+    // 3. Old index behaviour: Rust PersistenceKit SQLite backend does NOT replay
+    // Migration.operations (DropIndex, AddColumn etc.) — it uses idempotent
+    // CREATE TABLE/INDEX IF NOT EXISTS semantics on every open(). Swift does apply
+    // per-step migration ops, so Swift drops idx_metric_samples_dropbox_id here.
+    //
+    // On Rust v4 stores the old single-column index REMAINS after open() (it is
+    // inert — SQLite's planner picks the better-matching composite for the query;
+    // both coexist safely). This assertion documents the known divergence so that
+    // any future change that does start dropping it shows up as a diff.
+    let old_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("sqlite_master query must succeed");
+    assert_eq!(
+        old_count, 1,
+        "Rust v4→v5: old idx_metric_samples_dropbox_id remains (Rust does not replay DropIndex ops); found {old_count}"
+    );
 }

@@ -94,6 +94,16 @@ impl StatsStoreSchema {
     /// Key for the ISO-8601 timestamp of the last retention pass cutoff.
     pub const RETENTION_CUTOFF_KEY: &'static str = "retention_cutoff";
 
+    /// Key for the monitoring source marker.
+    ///
+    /// Value "default" means the monitoring flag was set by the wave 8.1 seed or
+    /// one-time migration — the operator has NOT explicitly chosen a value, so a
+    /// future migration is allowed to override it.
+    /// Value "user" means the operator explicitly called `setMonitoringEnabled` and
+    /// the migration MUST NOT revert that choice on re-open.
+    ///
+    pub const MONITORING_SOURCE_KEY: &'static str = "monitoring_source";
+
     // topology_snapshots table (v2)
 
     /// One row per estate. Latest-wins upsert via estate PRIMARY KEY.
@@ -280,6 +290,22 @@ fn make_schema() -> SchemaDeclaration {
                 columns: vec![StatsStoreSchema::TS_COLUMN.to_string()],
                 unique: false,
             },
+            // Composite index on metric_samples.(dropbox_id, name, ts) (v5).
+            // Replaces the v4 single-column dropbox_id index. The composite allows
+            // `WHERE dropbox_id=? AND name=? ORDER BY ts DESC LIMIT 1` probes used
+            // by `query_latest_metrics_by_names_and_dropboxes` to become pure index
+            // seeks. The composite also covers all dropbox_id-only queries (COUNT,
+            // query_metrics_by_names) because it starts with the dropbox_id prefix.
+            IndexDeclaration {
+                name: "idx_metric_samples_dropbox_name_ts".to_string(),
+                table: StatsStoreSchema::METRIC_SAMPLES_TABLE.to_string(),
+                columns: vec![
+                    StatsStoreSchema::DROPBOX_ID_COLUMN.to_string(),
+                    StatsStoreSchema::NAME_COLUMN.to_string(),
+                    StatsStoreSchema::TS_COLUMN.to_string(),
+                ],
+                unique: false,
+            },
         ],
         migrations: vec![
             // v1 → v2: add topology_snapshots table.
@@ -321,6 +347,49 @@ fn make_schema() -> SchemaDeclaration {
                         table: StatsStoreSchema::TOPOLOGY_SNAPSHOTS_TABLE.to_string(),
                         column: col_text_nullable(StatsStoreSchema::TOPOLOGY_FINGERPRINT_COLUMN),
                     },
+                ],
+            },
+            // v3 → v4: add dropbox_id index on metric_samples.
+            // Additive migration — no existing rows are touched. The index allows
+            // per-dropbox COUNT(*) queries to resolve in O(log n) instead of O(n)
+            // when metric_samples grows to millions of rows (observed: 6M in 3h).
+            Migration {
+                from_version: 3,
+                to_version: 4,
+                operations: vec![
+                    SchemaOperation::AddIndex(IndexDeclaration {
+                        name: "idx_metric_samples_dropbox_id".to_string(),
+                        table: StatsStoreSchema::METRIC_SAMPLES_TABLE.to_string(),
+                        columns: vec![StatsStoreSchema::DROPBOX_ID_COLUMN.to_string()],
+                        unique: false,
+                    }),
+                ],
+            },
+            // v4 → v5: replace single-column dropbox_id index with composite index.
+            // Drop idx_metric_samples_dropbox_id and add composite
+            // idx_metric_samples_dropbox_name_ts (dropbox_id, name, ts).
+            // The composite supports all existing dropbox_id-only queries (it starts
+            // with the dropbox_id prefix) while also enabling per-(dropbox, name)
+            // ORDER BY ts DESC LIMIT 1 seeks used by
+            // query_latest_metrics_by_names_and_dropboxes. This reduced dashboard
+            // /api/estates latency from 3.8–4.3s to sub-second on a 2.76M-row table.
+            Migration {
+                from_version: 4,
+                to_version: 5,
+                operations: vec![
+                    SchemaOperation::DropIndex {
+                        name: "idx_metric_samples_dropbox_id".to_string(),
+                    },
+                    SchemaOperation::AddIndex(IndexDeclaration {
+                        name: "idx_metric_samples_dropbox_name_ts".to_string(),
+                        table: StatsStoreSchema::METRIC_SAMPLES_TABLE.to_string(),
+                        columns: vec![
+                            StatsStoreSchema::DROPBOX_ID_COLUMN.to_string(),
+                            StatsStoreSchema::NAME_COLUMN.to_string(),
+                            StatsStoreSchema::TS_COLUMN.to_string(),
+                        ],
+                        unique: false,
+                    }),
                 ],
             },
         ],
@@ -386,6 +455,26 @@ pub(crate) fn decode_tags_json(json: &str) -> BTreeMap<String, String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DropboxMetricAggregate
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Per-dropbox metric aggregate: row count and latest timestamp.
+///
+/// Returned by `StatsStore::query_metric_aggregates_by_dropbox`. Carries only
+/// the aggregate values — no per-row tags or payloads. Designed to replace
+/// full-table-scan `query_metrics(None)` calls in the dashboard read path.
+///
+#[derive(Debug, Clone)]
+pub struct DropboxMetricAggregate {
+    /// The dropbox identifier (estate UUID or app identifier).
+    pub dropbox_id: String,
+    /// Number of metric rows for this dropbox (COUNT(*) on the indexed column).
+    pub metric_count: usize,
+    /// ISO-8601 UTC string of the most recent row, or None when count is 0.
+    pub last_metric_ts: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // StatsStore
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -410,7 +499,12 @@ impl StatsStore {
     /// v2: added topology_snapshots table (one row per estate, latest-wins upsert).
     /// v3: added topology_snapshots.topology_fingerprint (nullable) so the governor
     ///     can skip the full topology read on restart when inputs are unchanged.
-    pub const SCHEMA_VERSION: i32 = 3;
+    /// v4: added idx_metric_samples_dropbox_id so per-dropbox COUNT is O(log n).
+    /// v5: replaced idx_metric_samples_dropbox_id with composite index
+    ///     idx_metric_samples_dropbox_name_ts (dropbox_id, name, ts) so that
+    ///     per-(dropbox, name) ORDER BY ts DESC LIMIT 1 probes become pure index
+    ///     seeks instead of scanning the hot-dropbox prefix (0.45s → sub-ms).
+    pub const SCHEMA_VERSION: i32 = 5;
 
     // MARK: - Initialisation
 
@@ -436,35 +530,101 @@ impl StatsStore {
 
     /// Open the store and apply schema / migrations.
     ///
-    /// Seeds the default control rows ("monitoring"="0", "retention_cutoff"=epoch-zero)
-    /// ONLY IF ABSENT — seed-if-absent, NOT upsert.
+    /// Seeds the default control rows only if absent (seed-if-absent, NOT upsert).
     ///
     /// Rationale: upsert would overwrite an operator-set "monitoring" value on
-    /// every process restart, resetting the persistent on/off switch to "0" each
-    /// time the manager relaunches. Seeding only when the row is missing means the
-    /// first open installs the defaults and every subsequent open is a no-op for
-    /// (fix landed in Swift commit 852821cc).
+    /// every process restart, resetting the persistent on/off switch on each
+    /// relaunch. Seeding only when the row is missing means the first open installs
+    /// the defaults and every subsequent open is a no-op for those rows. Mirrors
+    /// Swift `StatsStore.open()` / `seedControlIfAbsent` exactly.
     ///
+    /// Wave 8.1: monitoring defaults ON for new estates (seed "1", not "0") and
+    /// a companion "monitoring_source" row is seeded as "default". The one-time
+    /// migration below flips existing estates that were seeded at "0" by a pre-8.1
+    /// binary — but only if the operator has not explicitly set monitoring via
     pub fn open(&self) -> Result<(), persistence_kit::StorageError> {
         let schema = make_schema();
+        // apply_schema creates all schema.tables and schema.indices with IF NOT EXISTS
+        // semantics on every open(). For index REMOVAL (e.g. the v4 single-column
+        // idx_metric_samples_dropbox_id dropped in favour of the v5 composite), the
+        // Rust SQLite backend does NOT replay Migration.operations — this is a known
+        // design divergence from Swift's PersistenceKitSQLite. The new composite index
+        // IS created via apply_schema's IF NOT EXISTS pass, so the outcome that matters
+        // (composite index exists on any-age store) is achieved. Old indices from prior
+        // versions remain on existing stores; they are inert (SQLite's planner picks
+        // the better-matching one) but not reclaimed. See conformance.rs
+        // v4_to_v5_migration_adds_composite_index for the documented divergence test.
         self.storage.open(&schema)?;
 
-        // Seed "monitoring" = "0" (off by default) only if absent.
-        // The manager sets this to "1" when it starts accepting subscribers.
+        // Seed "monitoring" = "1" (on by default, wave 8.1) only if absent.
         // Overwriting would reset the operator's on/off switch on every restart.
         self.seed_control_if_absent(
             StatsStoreSchema::MONITORING_KEY,
-            "0",
+            "1",
         )?;
 
+        // Seed "monitoring_source" = "default" only if absent.
+        // The source marker distinguishes a seed/migration value ("default") from
+        // an explicit operator choice ("user"). setMonitoringEnabled writes "user"
+        // so the migration below never reverts an explicit operator decision.
+        self.seed_control_if_absent(
+            StatsStoreSchema::MONITORING_SOURCE_KEY,
+            "default",
+        )?;
+
+        // Wave 8.1 one-time migration: flip monitoring "0" → "1" for estates
+        // that were seeded by a pre-8.1 binary (default-off seed), BUT only when
+        // the operator has not explicitly chosen a value (source != "user").
+        // If the operator turned monitoring off intentionally, we must not revert
+        // that choice here — the "user" marker is the guard.
+        let current_monitoring = self.read_control_value(StatsStoreSchema::MONITORING_KEY)?;
+        let current_source = self.read_control_value(StatsStoreSchema::MONITORING_SOURCE_KEY)?;
+        // "user" means operator explicitly set the flag; "unknown" means
+        // Swift preserved a pre-existing opt-out with indeterminate origin.
+        // Both must be respected — only "default" (seeded, never touched)
+        // is eligible for the pre-8.1 upgrade to monitoring=1.
+        let source_is_default = current_source.as_deref().map_or(true, |s| s == "default");
+        if current_monitoring.as_deref() == Some("0") && source_is_default {
+            // Pre-8.1 seeded "0" with no operator override → upgrade to "1".
+            self.upsert_control_value(StatsStoreSchema::MONITORING_KEY, "1")?;
+        }
+
         // Seed "retention_cutoff" = epoch-zero ISO-8601 only if absent.
-        // Epoch zero ("1970-01-01T00:00:00.000Z") indicates no retention pass
-        // has run yet. Overwriting would erase the last-known retention timestamp.
+        // Epoch zero indicates no retention pass has run yet.
         self.seed_control_if_absent(
             StatsStoreSchema::RETENTION_CUTOFF_KEY,
             "1970-01-01T00:00:00.000Z",
         )?;
 
+        Ok(())
+    }
+
+    /// Read a single control-table value by key. Returns None if the key is absent.
+    fn read_control_value(&self, key: &str) -> Result<Option<String>, persistence_kit::StorageError> {
+        let rs = self.storage.row_store();
+        let predicate = StoragePredicate::Eq(
+            Column {
+                table: StatsStoreSchema::CONTROL_TABLE.to_string(),
+                name: StatsStoreSchema::KEY_COLUMN.to_string(),
+            },
+            TypedValue::Text(key.to_string()),
+        );
+        let rows = rs.query(StatsStoreSchema::CONTROL_TABLE, Some(&predicate), &[], Some(1), None)?;
+        Ok(rows.first().and_then(|row| {
+            match row.values.get(StatsStoreSchema::CONTROL_VALUE_COLUMN) {
+                Some(TypedValue::Text(v)) => Some(v.clone()),
+                _ => None,
+            }
+        }))
+    }
+
+    /// Upsert a control-table row, replacing the value if the key already exists.
+    fn upsert_control_value(&self, key: &str, value: &str) -> Result<(), persistence_kit::StorageError> {
+        let rs = self.storage.row_store();
+        let mut row = BTreeMap::new();
+        row.insert(StatsStoreSchema::KEY_COLUMN.to_string(), TypedValue::Text(key.to_string()));
+        row.insert(StatsStoreSchema::CONTROL_VALUE_COLUMN.to_string(), TypedValue::Text(value.to_string()));
+        rs.upsert(StatsStoreSchema::CONTROL_TABLE, row, &[StatsStoreSchema::KEY_COLUMN.to_string()])?;
         Ok(())
     }
 
@@ -548,22 +708,17 @@ impl StatsStore {
 
     /// Set the monitoring flag.
     ///
+    /// Writing the flag also writes `monitoring_source` = "user" so the wave 8.1
+    /// one-time migration in `open()` knows not to revert an explicit operator
     pub fn set_monitoring_enabled(&self, enabled: bool) -> Result<(), persistence_kit::StorageError> {
-        let rs = self.storage.row_store();
-        let mut row = BTreeMap::new();
-        row.insert(
-            StatsStoreSchema::KEY_COLUMN.to_string(),
-            TypedValue::Text(StatsStoreSchema::MONITORING_KEY.to_string()),
-        );
-        row.insert(
-            StatsStoreSchema::CONTROL_VALUE_COLUMN.to_string(),
-            TypedValue::Text(if enabled { "1" } else { "0" }.to_string()),
-        );
-        rs.upsert(
-            StatsStoreSchema::CONTROL_TABLE,
-            row,
-            &[StatsStoreSchema::KEY_COLUMN.to_string()],
+        // Write the monitoring flag.
+        self.upsert_control_value(
+            StatsStoreSchema::MONITORING_KEY,
+            if enabled { "1" } else { "0" },
         )?;
+        // Mark the choice as operator-explicit so the one-time migration in open()
+        // never reverts it on the next process start.
+        self.upsert_control_value(StatsStoreSchema::MONITORING_SOURCE_KEY, "user")?;
         Ok(())
     }
 
@@ -786,6 +941,148 @@ impl StatsStore {
         rs.count(StatsStoreSchema::METRIC_SAMPLES_TABLE, None)
     }
 
+    /// Return per-dropbox aggregate (count + last ts ISO-8601) for the given IDs.
+    ///
+    /// Replaces `query_metrics(None)` full-table scans in the manager's
+    /// `server_payload` and `status` methods. For each requested dropbox ID:
+    ///   1. `COUNT(*) WHERE dropbox_id = id` — indexed, O(log n).
+    ///   2. `query_projected(ts) WHERE dropbox_id = id ORDER BY ts DESC LIMIT 1`
+    ///      — reads only the ts column (no tags decode), O(log n) with index.
+    ///
+    /// A dropbox with zero rows still appears in the output (count=0, last_ts=None).
+    pub fn query_metric_aggregates_by_dropbox(
+        &self,
+        dropbox_ids: &[&str],
+    ) -> Result<Vec<DropboxMetricAggregate>, persistence_kit::StorageError> {
+        if dropbox_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rs = self.storage.row_store();
+        let table = StatsStoreSchema::METRIC_SAMPLES_TABLE;
+        let db_col = Column {
+            table: table.to_string(),
+            name: StatsStoreSchema::DROPBOX_ID_COLUMN.to_string(),
+        };
+        let ts_col = Column {
+            table: table.to_string(),
+            name: StatsStoreSchema::TS_COLUMN.to_string(),
+        };
+
+        let mut results = Vec::with_capacity(dropbox_ids.len());
+        for &id in dropbox_ids {
+            let predicate = StoragePredicate::Eq(db_col.clone(), TypedValue::Text(id.to_string()));
+
+            // COUNT(*) WHERE dropbox_id = id — indexed, no row decode.
+            let count = rs.count(table, Some(&predicate))?;
+
+            // SELECT ts WHERE dropbox_id = id ORDER BY ts DESC LIMIT 1.
+            // Reads only the ts column (no tags/name/value blob).
+            let last_ts = if count > 0 {
+                let order = PkOrderClause {
+                    column: ts_col.clone(),
+                    direction: OrderDirection::Descending,
+                };
+                let rows = rs.query_projected(
+                    table,
+                    &[StatsStoreSchema::TS_COLUMN],
+                    Some(&predicate),
+                    &[order],
+                    Some(1),
+                    None,
+                )?;
+                rows.first().and_then(|row| {
+                    // ts column is stored as ISO-8601 TEXT on disk; PersistenceKit's
+                    // Rust SQLite backend reads it back as TypedValue::Timestamp(ms)
+                    // (milliseconds since Unix epoch) while InMemory may return Text.
+                    // Handle both representations for backend parity.
+                    match row.get(StatsStoreSchema::TS_COLUMN) {
+                        Some(TypedValue::Text(s)) => Some(s.clone()),
+                        Some(TypedValue::Timestamp(ms)) => {
+                            // ms → epoch seconds (f64) → ISO-8601 TEXT
+                            Some(epoch_to_iso8601(*ms as f64 / 1000.0))
+                        }
+                        _ => None,
+                    }
+                })
+            } else {
+                None
+            };
+
+            results.push(DropboxMetricAggregate {
+                dropbox_id: id.to_string(),
+                metric_count: count,
+                last_metric_ts: last_ts,
+            });
+        }
+        Ok(results)
+    }
+
+    /// Return the single most-recent MetricRow for each (name, dropbox_id) pair.
+    ///
+    /// This is the correct replacement for `query_metrics_by_names` in paths that
+    /// only need the LATEST value per (metric, consumer) — e.g. the `estates_payload`
+    /// queue-stats block, where 8 names × N dropboxes produces at most 8×N rows
+    /// regardless of total table size.
+    ///
+    /// For each pair this method issues one indexed query:
+    ///   `WHERE name = ? AND dropbox_id = ? ORDER BY ts DESC LIMIT 1`
+    /// Both columns have B-tree indexes, so each resolves in O(log n) not O(n).
+    /// Pairs with no matching rows are skipped; result count is ≤ |names| × |dropbox_ids|.
+    ///
+    pub fn query_latest_metrics_by_names_and_dropboxes(
+        &self,
+        names: &[&str],
+        dropbox_ids: &[&str],
+    ) -> Result<Vec<MetricRow>, persistence_kit::StorageError> {
+        if names.is_empty() || dropbox_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rs = self.storage.row_store();
+        let table = StatsStoreSchema::METRIC_SAMPLES_TABLE;
+        let name_col = Column {
+            table: table.to_string(),
+            name: StatsStoreSchema::NAME_COLUMN.to_string(),
+        };
+        let db_col = Column {
+            table: table.to_string(),
+            name: StatsStoreSchema::DROPBOX_ID_COLUMN.to_string(),
+        };
+        let ts_col = Column {
+            table: table.to_string(),
+            name: StatsStoreSchema::TS_COLUMN.to_string(),
+        };
+        let ts_order = PkOrderClause {
+            column: ts_col,
+            direction: OrderDirection::Descending,
+        };
+
+        let mut results = Vec::with_capacity(names.len() * dropbox_ids.len());
+        for &dropbox_id in dropbox_ids {
+            for &name in names {
+                // Compound predicate: `WHERE name = ? AND dropbox_id = ?`
+                // The idx_metric_samples_dropbox_id index narrows to one dropbox's
+                // rows; ts DESC LIMIT 1 picks the most-recent sample for that pair.
+                let predicate = StoragePredicate::And(vec![
+                    StoragePredicate::Eq(name_col.clone(), TypedValue::Text(name.to_string())),
+                    StoragePredicate::Eq(db_col.clone(), TypedValue::Text(dropbox_id.to_string())),
+                ]);
+                let rows = rs.query(
+                    table,
+                    Some(&predicate),
+                    &[ts_order.clone()],
+                    Some(1),
+                    None,
+                )?;
+                if let Some(row) = rows.into_iter().next() {
+                    if let Some(metric) = MetricRow::from_storage_row(row) {
+                        results.push(metric);
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
     // MARK: - Retention
 
     /// Delete metric samples with `ts` strictly before `cutoff_epoch_secs`.
@@ -1003,13 +1300,16 @@ impl StatsStore {
         )?;
         // PRIMARY KEY lookup yields ≤1 row; the None-estate path picks the
         // newest generated_at across estates. The column is written as TEXT
-        // ISO-8601 but the storage backend parses it back to `Timestamp(secs)`
-        // on read; tolerate BOTH representations (InMemory and SQLite can differ
-        // on read-back type) and normalise to epoch seconds so the comparison is
-        // numeric. Absent/unparseable sorts oldest.
+        // ISO-8601; the SQLite backend decodes it back as Timestamp(ms) (epoch
+        // MILLISECONDS). For ordering purposes the units don't matter as long as
+        // they are consistent within a backend — both Timestamp(ms) and the
+        // Text path (which returns seconds as i64) are monotonically comparable
+        // for finding the max. Absent/unparseable sorts oldest.
         fn generated_at(row: &persistence_kit::StorageRow) -> i64 {
             match row.values.get(StatsStoreSchema::GENERATED_AT_COLUMN) {
-                Some(TypedValue::Timestamp(t)) => *t,
+                // SQLite path: Timestamp(ms) — use raw ms for comparison (monotonic).
+                Some(TypedValue::Timestamp(ms)) => *ms,
+                // InMemory path: read back as Text → convert to seconds as i64.
                 Some(TypedValue::Text(s)) => iso8601_to_epoch(s) as i64,
                 _ => i64::MIN,
             }
@@ -1120,10 +1420,11 @@ impl MetricRow {
             TypedValue::Text(s) => s.clone(),
             _ => return None,
         };
-        // Timestamp is stored as Timestamp(i64 epoch seconds) by the SQLite backend
-        // after decoding from ISO-8601 TEXT. Convert back to f64.
+        // The SQLite backend decodes TEXT ISO-8601 timestamp columns as
+        // TypedValue::Timestamp(ms) where the i64 is epoch MILLISECONDS, not seconds.
+        // Divide by 1000 to recover epoch seconds (f64) matching the caller's expectation.
         let ts_epoch = match row.values.get(StatsStoreSchema::TS_COLUMN)? {
-            TypedValue::Timestamp(secs) => *secs as f64,
+            TypedValue::Timestamp(ms) => *ms as f64 / 1000.0,
             TypedValue::Text(s) => iso8601_to_epoch(s),
             _ => return None,
         };
@@ -1175,8 +1476,10 @@ impl EventRow {
             TypedValue::Text(s) => s.clone(),
             _ => return None,
         };
+        // Timestamp is stored as TEXT ISO-8601; the SQLite backend decodes it as
+        // TypedValue::Timestamp(ms) — epoch MILLISECONDS. Divide by 1000 → seconds.
         let ts_epoch = match row.values.get(StatsStoreSchema::TS_COLUMN)? {
-            TypedValue::Timestamp(secs) => *secs as f64,
+            TypedValue::Timestamp(ms) => *ms as f64 / 1000.0,
             TypedValue::Text(s) => iso8601_to_epoch(s),
             _ => return None,
         };

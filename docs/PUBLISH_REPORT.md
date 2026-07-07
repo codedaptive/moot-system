@@ -2,7 +2,7 @@
 # Publish Report
 
 Venue: `moot-system`
-Source commit: `2b2e66e0de0bb58438202a6b54ee84495c759d63`
+Source commit: `5d94bcc7cf411088843b9107c755c2c56f678113`
 
 ## Loaded Packages
 
@@ -109,6 +109,7 @@ Removed internal/process comment lines:
 - `packages/kits/QueueKit/Sources/QueueKit/PersistenceKitBackend.swift`: 5 line(s)
 - `packages/kits/QueueKit/Sources/QueueKit/QueueBackend.swift`: 9 line(s)
 - `packages/kits/QueueKit/Sources/QueueKit/QueueKit.swift`: 2 line(s)
+- `packages/kits/QueueKit/Sources/QueueKit/QueueKitTelemetry.swift`: 7 line(s)
 - `packages/kits/QueueKit/Tests/QueueKitTests/AwaitDrainTests.swift`: 2 line(s)
 - `packages/kits/QueueKit/Tests/QueueKitTests/ConformanceTests.swift`: 1 line(s)
 - `packages/kits/QueueKit/Tests/QueueKitTests/DrainLeaseTests.swift`: 3 line(s)
@@ -116,13 +117,14 @@ Removed internal/process comment lines:
 - `packages/kits/QueueKit/Tests/QueueKitTests/FixtureGenerator.swift`: 1 line(s)
 - `packages/kits/QueueKit/Tests/QueueKitTests/IdentifierTypeTests.swift`: 1 line(s)
 - `packages/kits/QueueKit/Tests/QueueKitTests/PersistenceKitBackendTests.swift`: 5 line(s)
+- `packages/kits/QueueKit/Tests/QueueKitTests/QueueKitTelemetryThrottleTests.swift`: 5 line(s)
 - `packages/kits/QueueKit/Tests/QueueKitTests/ReclaimInFlightTests.swift`: 4 line(s)
 - `packages/kits/QueueKit/Tests/QueueKitTests/StreamScopedDrainTests.swift`: 11 line(s)
 - `packages/kits/QueueKit/Tests/QueueKitTests/SupportingTypeTests.swift`: 1 line(s)
 - `packages/kits/QueueKit/rust/src/backend.rs`: 6 line(s)
 - `packages/kits/QueueKit/rust/src/drain_lease.rs`: 8 line(s)
 - `packages/kits/QueueKit/rust/src/error.rs`: 1 line(s)
-- `packages/kits/QueueKit/rust/src/facade.rs`: 13 line(s)
+- `packages/kits/QueueKit/rust/src/facade.rs`: 23 line(s)
 - `packages/kits/QueueKit/rust/src/filesystem.rs`: 7 line(s)
 - `packages/kits/QueueKit/rust/src/job.rs`: 3 line(s)
 - `packages/kits/QueueKit/rust/src/persistencekit.rs`: 13 line(s)
@@ -139,8 +141,8 @@ Removed internal/process comment lines:
 - `packages/libs/ObserverSink/Sources/ObserverSink/StatsStore.swift`: 2 line(s)
 - `packages/libs/ObserverSink/rust/src/lib.rs`: 1 line(s)
 - `packages/libs/ObserverSink/rust/src/sink.rs`: 3 line(s)
-- `packages/libs/ObserverSink/rust/src/store.rs`: 30 line(s)
-- `packages/libs/ObserverSink/rust/tests/conformance.rs`: 6 line(s)
+- `packages/libs/ObserverSink/rust/src/store.rs`: 33 line(s)
+- `packages/libs/ObserverSink/rust/tests/conformance.rs`: 10 line(s)
 
 ## Dependency Rewrites
 
