@@ -24,7 +24,7 @@ let package = Package(
         .library(name: "ObserverSink", targets: ["ObserverSink"])
     ],
     dependencies: [
-        .package(url: "https://github.com/codedaptive/moot-core.git", exact: "1.0.30"),
+        .package(url: "https://github.com/codedaptive/moot-core.git", exact: "1.0.31-rc.1"),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.21.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.25.0")
@@ -130,7 +130,7 @@ let package = Package(
         ),
         .testTarget(
             name: "PersistenceKitSQLiteTests",
-            dependencies: ["PersistenceKit", "PersistenceKitSQLite", "PersistenceKitConformance", .product(name: "SubstrateTypes", package: "moot-core"), "SQLCipher", .product(name: "IntellectusLib", package: "moot-core")],
+            dependencies: ["PersistenceKit", "PersistenceKitSQLite", "PersistenceKitConformance", .product(name: "SubstrateTypes", package: "moot-core"), "SQLCipher", .product(name: "IntellectusLib", package: "moot-core"), "PersistenceKitInMemory"],
             path: "packages/kits/PersistenceKit/Tests/PersistenceKitSQLiteTests"
         ),
         .testTarget(
