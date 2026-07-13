@@ -181,6 +181,22 @@ struct DatasetStoreTests {
         }
     }
 
+    /// SQL-injection attempt: double-quote in primary-key column name.
+    @Test func invalidIdentifier_primaryKeyColumn_sqlInjection_doubleQuote() async {
+        let ds = makeInMemory().datasetStore
+        let badName = "id\")); DROP TABLE dataset; --"
+        let schema = DatasetSchema(
+            columns: [
+                ColumnDeclaration(name: "id", type: .integer, nullable: false),
+                ColumnDeclaration(name: "value", type: .text, nullable: true)
+            ],
+            primaryKeyColumn: badName
+        )
+        await #expect(throws: StorageError.self) {
+            try await ds.createDataset(id: UUID(), schema: schema, indexes: [])
+        }
+    }
+
     /// Rejected column name in `appendRows` key must fail the whole
     /// operation before any rows are written.
     @Test func invalidIdentifier_inAppendRows() async throws {
