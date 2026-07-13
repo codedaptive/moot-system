@@ -2,7 +2,7 @@
 # Publish Report
 
 Venue: `moot-system`
-Source commit: `58d01422706e2ac88e5d0d1904a9860435bbd8cc`
+Source commit: `88a99fed625877d7037404a6e15ab852950fa195`
 
 ## Loaded Packages
 
@@ -33,16 +33,18 @@ Removed internal/process comment lines:
 - `packages/kits/ConvergenceKit/Tests/ConvergenceKitFederationTests/FederationPairingTests.swift`: 1 line(s)
 - `packages/kits/ConvergenceKit/Tests/ConvergenceKitNoneTests/NoSyncEngineTests.swift`: 1 line(s)
 - `packages/kits/ConvergenceKit/Tests/ConvergenceKitTests/ConvergenceKitCoreTypeTests.swift`: 1 line(s)
-- `packages/kits/ConvergenceKit/rust/src/federation.rs`: 5 line(s)
+- `packages/kits/ConvergenceKit/rust/src/federation.rs`: 6 line(s)
 - `packages/kits/ConvergenceKit/rust/src/record.rs`: 1 line(s)
-- `packages/kits/ConvergenceKit/rust/tests/federation_tests.rs`: 1 line(s)
+- `packages/kits/ConvergenceKit/rust/tests/federation_tests.rs`: 3 line(s)
 - `packages/kits/ConvergenceKit/rust/tests/wire_format_tests.rs`: 1 line(s)
 - `packages/kits/PersistenceKit/Package.swift`: 4 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKit/AuditLog.swift`: 1 line(s)
+- `packages/kits/PersistenceKit/Sources/PersistenceKit/DatasetStore.swift`: 6 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKit/EstateConfiguration.swift`: 2 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKit/GeneratedColumn.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKit/HashingRowStore.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKit/RowCrypto.swift`: 1 line(s)
+- `packages/kits/PersistenceKit/Sources/PersistenceKit/Storage.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKit/StorageObserver.swift`: 3 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKit/TypedValue.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKitInMemory/InMemoryAuditLog.swift`: 1 line(s)
@@ -59,6 +61,7 @@ Removed internal/process comment lines:
 - `packages/kits/PersistenceKit/Sources/PersistenceKitSQLite/SQLiteStorage.swift`: 3 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKitSQLite/SQLiteStores.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitConformance/ConformanceRunner.swift`: 1 line(s)
+- `packages/kits/PersistenceKit/Tests/PersistenceKitDatasetTests/DatasetStoreTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/CacheWiringTests.swift`: 3 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/CachingRowStoreTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/ErasureLedgerTests.swift`: 1 line(s)
@@ -71,6 +74,7 @@ Removed internal/process comment lines:
 - `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/SecurityHardeningTests.swift`: 2 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/SnapshotRegistryTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitPostgreSQLTests/PostgreSQLBasicTests.swift`: 1 line(s)
+- `packages/kits/PersistenceKit/Tests/PersistenceKitPostgreSQLTests/PostgreSQLDatasetStoreTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitPostgreSQLTests/PostgreSQLSecurityTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitReplicationTests/IncrementalReplicationTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitReplicationTests/ReplicationConformanceTests.swift`: 1 line(s)
@@ -86,6 +90,7 @@ Removed internal/process comment lines:
 - `packages/kits/PersistenceKit/rust/src/audit_log.rs`: 1 line(s)
 - `packages/kits/PersistenceKit/rust/src/cache_invalidator.rs`: 2 line(s)
 - `packages/kits/PersistenceKit/rust/src/caching_row_store.rs`: 2 line(s)
+- `packages/kits/PersistenceKit/rust/src/dataset_store.rs`: 10 line(s)
 - `packages/kits/PersistenceKit/rust/src/encryption.rs`: 8 line(s)
 - `packages/kits/PersistenceKit/rust/src/encryption_tests.rs`: 1 line(s)
 - `packages/kits/PersistenceKit/rust/src/hashing_row_store.rs`: 1 line(s)
@@ -97,11 +102,12 @@ Removed internal/process comment lines:
 - `packages/kits/PersistenceKit/rust/src/postgres.rs`: 7 line(s)
 - `packages/kits/PersistenceKit/rust/src/replication.rs`: 1 line(s)
 - `packages/kits/PersistenceKit/rust/src/sqlite.rs`: 23 line(s)
-- `packages/kits/PersistenceKit/rust/src/storage.rs`: 5 line(s)
+- `packages/kits/PersistenceKit/rust/src/storage.rs`: 6 line(s)
 - `packages/kits/PersistenceKit/rust/src/types.rs`: 5 line(s)
 - `packages/kits/PersistenceKit/rust/tests/conformance/mod.rs`: 1 line(s)
 - `packages/kits/PersistenceKit/rust/tests/hashing_row_store_tests.rs`: 1 line(s)
 - `packages/kits/PersistenceKit/rust/tests/inmemory_tests.rs`: 1 line(s)
+- `packages/kits/PersistenceKit/rust/tests/postgres_dataset_store.rs`: 1 line(s)
 - `packages/kits/PersistenceKit/rust/tests/queue_sibling_tests.rs`: 1 line(s)
 - `packages/kits/QueueKit/Sources/QueueKit/DrainLease.swift`: 4 line(s)
 - `packages/kits/QueueKit/Sources/QueueKit/FilesystemBackend.swift`: 5 line(s)

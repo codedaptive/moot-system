@@ -24,7 +24,7 @@ let package = Package(
         .library(name: "ObserverSink", targets: ["ObserverSink"])
     ],
     dependencies: [
-        .package(url: "https://github.com/codedaptive/moot-core.git", exact: "1.0.31-rc.1"),
+        .package(url: "https://github.com/codedaptive/moot-core.git", exact: "1.0.31"),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.21.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.25.0")
@@ -90,6 +90,7 @@ let package = Package(
             path: "packages/kits/PersistenceKit/Sources/SQLCipher",
             exclude: ["LICENSE.md"],
             publicHeadersPath: "include",
+            resources: [.copy("PrivacyInfo.xcprivacy")],
             cSettings: [.define("SQLITE_HAS_CODEC"), .define("SQLCIPHER_CRYPTO_CC"), .define("SQLITE_TEMP_STORE=2"), .define("SQLITE_EXTRA_INIT=sqlcipher_extra_init"), .define("SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown"), .define("NDEBUG")],
             linkerSettings: [.linkedFramework("Security")]
         ),
@@ -130,7 +131,7 @@ let package = Package(
         ),
         .testTarget(
             name: "PersistenceKitSQLiteTests",
-            dependencies: ["PersistenceKit", "PersistenceKitSQLite", "PersistenceKitConformance", .product(name: "SubstrateTypes", package: "moot-core"), "SQLCipher", .product(name: "IntellectusLib", package: "moot-core"), "PersistenceKitInMemory"],
+            dependencies: ["PersistenceKit", "PersistenceKitSQLite", "PersistenceKitInMemory", "PersistenceKitConformance", .product(name: "SubstrateTypes", package: "moot-core"), "SQLCipher", .product(name: "IntellectusLib", package: "moot-core"), "PersistenceKitInMemory"],
             path: "packages/kits/PersistenceKit/Tests/PersistenceKitSQLiteTests"
         ),
         .testTarget(
@@ -143,10 +144,16 @@ let package = Package(
             dependencies: ["PersistenceKit", "PersistenceKitReplication", "PersistenceKitInMemory", "PersistenceKitSQLite", .product(name: "SubstrateTypes", package: "moot-core"), "SQLCipher"],
             path: "packages/kits/PersistenceKit/Tests/PersistenceKitReplicationTests"
         ),
+        .testTarget(
+            name: "PersistenceKitDatasetTests",
+            dependencies: ["PersistenceKit", "PersistenceKitInMemory", "PersistenceKitSQLite", .product(name: "SubstrateTypes", package: "moot-core"), "SQLCipher"],
+            path: "packages/kits/PersistenceKit/Tests/PersistenceKitDatasetTests"
+        ),
         .target(
             name: "QueueKit",
             dependencies: [.product(name: "SubstrateTypes", package: "moot-core"), "PersistenceKit", .product(name: "IntellectusLib", package: "moot-core")],
-            path: "packages/kits/QueueKit/Sources/QueueKit"
+            path: "packages/kits/QueueKit/Sources/QueueKit",
+            resources: [.copy("PrivacyInfo.xcprivacy")]
         ),
         .testTarget(
             name: "QueueKitTests",
