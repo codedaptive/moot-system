@@ -1055,6 +1055,39 @@ fn compare_typed_values(a: &TypedValue, b: &TypedValue) -> Option<std::cmp::Orde
         (TypedValue::Uuid(x), TypedValue::Uuid(y)) => Some(x.as_bytes().cmp(y.as_bytes())),
         (TypedValue::Timestamp(x), TypedValue::Timestamp(y)) => Some(x.cmp(y)),
         (TypedValue::Hlc(x), TypedValue::Hlc(y)) => Some(hlc_cmp(x, y)),
+        (TypedValue::Blob(x), TypedValue::Blob(y)) => {
+            // and SQLite BLOB affinity ordering. Equality predicates (.Eq/.Neq/.In) use
+            // TypedValue PartialEq directly (already correct for Blob); these arms
+            // additionally enable consistent ordering predicates and sort on blob columns.
+            Some(x.cmp(y))
+        }
+        (TypedValue::Json(x), TypedValue::Json(y)) => {
+            // json is pre-encoded bytes; compare byte-wise, same as Blob.
+            Some(x.cmp(y))
+        }
+        (TypedValue::Fingerprint(x), TypedValue::Fingerprint(y)) => {
+            // Block-wise compare in declaration order (block0 … block3 = bits 0–255).
+            Some(
+                x.block0.cmp(&y.block0)
+                    .then(x.block1.cmp(&y.block1))
+                    .then(x.block2.cmp(&y.block2))
+                    .then(x.block3.cmp(&y.block3)),
+            )
+        }
+        (TypedValue::Array(xs), TypedValue::Array(ys)) => {
+            // Element-wise recursive compare; length is the tiebreak.
+            // Returns None if any element pair is incomparable (mismatched variants),
+            // propagating None upward consistent with the overall comparator contract.
+            // Mirrors the Swift leg's array arm.
+            for (xe, ye) in xs.iter().zip(ys.iter()) {
+                match compare_typed_values(xe, ye) {
+                    Some(ord) if ord != std::cmp::Ordering::Equal => return Some(ord),
+                    None => return None,
+                    _ => {}
+                }
+            }
+            Some(xs.len().cmp(&ys.len()))
+        }
         _ => None,
     }
 }

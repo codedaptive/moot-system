@@ -2,7 +2,7 @@
 # Publish Report
 
 Venue: `moot-system`
-Source commit: `88a99fed625877d7037404a6e15ab852950fa195`
+Source commit: `6fe29be84ff7ccdae2aaa0dcffb78ecada6076cb`
 
 ## Loaded Packages
 
@@ -50,6 +50,7 @@ Removed internal/process comment lines:
 - `packages/kits/PersistenceKit/Sources/PersistenceKitInMemory/InMemoryAuditLog.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKitInMemory/InMemoryRowStore.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKitInMemory/InMemoryStorage.swift`: 1 line(s)
+- `packages/kits/PersistenceKit/Sources/PersistenceKitInMemory/PredicateEvaluator.swift`: 2 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKitPostgreSQL/PostgreSQLConnection.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKitPostgreSQL/PostgreSQLStorage.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Sources/PersistenceKitPostgreSQL/PostgreSQLStores.swift`: 1 line(s)
@@ -69,6 +70,7 @@ Removed internal/process comment lines:
 - `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/GCPinTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/HashingRowStoreTests.swift`: 2 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/InMemoryBasicTests.swift`: 1 line(s)
+- `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/InMemoryComparatorTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/InMemoryObserverTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/PersistenceKitTelemetryTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitInMemoryTests/SecurityHardeningTests.swift`: 2 line(s)
@@ -76,9 +78,9 @@ Removed internal/process comment lines:
 - `packages/kits/PersistenceKit/Tests/PersistenceKitPostgreSQLTests/PostgreSQLBasicTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitPostgreSQLTests/PostgreSQLDatasetStoreTests.swift`: 1 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitPostgreSQLTests/PostgreSQLSecurityTests.swift`: 1 line(s)
-- `packages/kits/PersistenceKit/Tests/PersistenceKitReplicationTests/IncrementalReplicationTests.swift`: 1 line(s)
+- `packages/kits/PersistenceKit/Tests/PersistenceKitReplicationTests/IncrementalReplicationTests.swift`: 2 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitReplicationTests/ReplicationConformanceTests.swift`: 1 line(s)
-- `packages/kits/PersistenceKit/Tests/PersistenceKitReplicationTests/SnapshotReplicationTests.swift`: 1 line(s)
+- `packages/kits/PersistenceKit/Tests/PersistenceKitReplicationTests/SnapshotReplicationTests.swift`: 2 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitSQLiteTests/CacheWiringTests.swift`: 3 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitSQLiteTests/EncryptionInvariantTests.swift`: 4 line(s)
 - `packages/kits/PersistenceKit/Tests/PersistenceKitSQLiteTests/EncryptionWiringTests.swift`: 2 line(s)
@@ -95,7 +97,7 @@ Removed internal/process comment lines:
 - `packages/kits/PersistenceKit/rust/src/encryption_tests.rs`: 1 line(s)
 - `packages/kits/PersistenceKit/rust/src/hashing_row_store.rs`: 1 line(s)
 - `packages/kits/PersistenceKit/rust/src/incremental_replication.rs`: 6 line(s)
-- `packages/kits/PersistenceKit/rust/src/inmemory.rs`: 3 line(s)
+- `packages/kits/PersistenceKit/rust/src/inmemory.rs`: 6 line(s)
 - `packages/kits/PersistenceKit/rust/src/introspection.rs`: 1 line(s)
 - `packages/kits/PersistenceKit/rust/src/lib.rs`: 1 line(s)
 - `packages/kits/PersistenceKit/rust/src/observer.rs`: 5 line(s)
