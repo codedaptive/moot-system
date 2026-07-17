@@ -2449,6 +2449,9 @@ impl DatasetStore for SqliteDatasetStoreShim {
         for col in &schema.columns {
             validate_dataset_column_identifier(&col.name)?;
         }
+        if let Some(pk) = &schema.primary_key_column {
+            validate_dataset_column_identifier(pk)?;
+        }
         for idx in indexes {
             validate_dataset_column_identifier(&idx.column)?;
         }
@@ -4134,6 +4137,25 @@ mod sql_identifier_injection_tests {
         let rs = Storage::row_store(&storage);
         let bad = inject_map("id\"; DROP TABLE items; --");
         let err = rs.insert("items", bad).unwrap_err();
+        assert!(
+            matches!(err, StorageError::InvalidIdentifier { .. }),
+            "expected InvalidIdentifier, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn create_dataset_rejects_primary_key_column_with_double_quote() {
+        let storage = injection_test_storage();
+        let ds = Storage::dataset_store(&storage).expect("dataset store");
+        let schema = DatasetSchema {
+            columns: vec![
+                ColumnDeclaration::new("id", ColumnType::Int),
+                ColumnDeclaration::new("value", ColumnType::Text),
+            ],
+            primary_key_column: Some("id\")); DROP TABLE items; --".to_string()),
+        };
+
+        let err = ds.create_dataset(Uuid::new_v4(), &schema, &[]).unwrap_err();
         assert!(
             matches!(err, StorageError::InvalidIdentifier { .. }),
             "expected InvalidIdentifier, got: {err:?}"

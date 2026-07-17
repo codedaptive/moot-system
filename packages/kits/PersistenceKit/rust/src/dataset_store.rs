@@ -334,6 +334,9 @@ impl DatasetStore for InMemoryDatasetStore {
         for col in &schema.columns {
             validate_dataset_column_identifier(&col.name)?;
         }
+        if let Some(pk) = &schema.primary_key_column {
+            validate_dataset_column_identifier(pk)?;
+        }
         for idx in indexes {
             validate_dataset_column_identifier(&idx.column)?;
         }

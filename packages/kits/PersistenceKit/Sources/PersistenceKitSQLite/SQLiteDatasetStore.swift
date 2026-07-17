@@ -63,6 +63,9 @@ final class SQLiteDatasetStore: DatasetStore, Sendable {
         for col in schema.columns {
             try validateDatasetColumnIdentifier(col.name)
         }
+        if let primaryKeyColumn = schema.primaryKeyColumn {
+            try validateDatasetColumnIdentifier(primaryKeyColumn)
+        }
         for idx in indexes {
             try validateDatasetColumnIdentifier(idx.column)
         }
