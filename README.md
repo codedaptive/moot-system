@@ -5,46 +5,106 @@ MOOT System provides storage, queueing, sync, and telemetry services for MOOTx01
 
 Current version: `v1.0.32` · generated from canonical source commit `6fe29be84`.
 
-## What This Repository Is
+> **Choose this repository when:** You need storage backends, user-defined datasets, durable queues, synchronization, telemetry persistence, or a small loopback HTTP server.
 
-This repository is an Apache-2.0 published library venue for the MOOTx01
-Framework, generated from the canonical MOOTx01 product tree by the library
-publisher. Every release records its source commit in `SOURCE.md` and its
-load manifest in `docs/PUBLISH_REPORT.md`.
+[Documentation index](docs/README.md) · [package map](docs/PACKAGE_MAP.md) ·
+[dependency graph](docs/DEPENDENCY_GRAPH.md) · [security policy](SECURITY.md)
+
+## Open-source SDK family
+
+The MOOTx01 engines are published as four standalone Apache-2.0 repositories.
+You can install one repository or compose the family.
+
+| Repository | Use it for |
+|---|---|
+| [`moot-memory`](https://github.com/codedaptive/moot-memory) | Structured memory, vector search, and local RAG |
+| [`moot-semantics`](https://github.com/codedaptive/moot-semantics) | ARIA vocabulary and deterministic local classification |
+| [`moot-system`](https://github.com/codedaptive/moot-system) | Storage, datasets, queues, sync, telemetry, and loopback HTTP |
+| [`moot-core`](https://github.com/codedaptive/moot-core) | Shared types, kernel, fingerprints, lifecycle rules, and memory math |
+
+Dependency order is `moot-core`, then `moot-semantics` and `moot-system`,
+then `moot-memory`. The release tags move in lockstep.
 
 ## Packages
 
-- `packages/kits/PersistenceKit`
-- `packages/kits/QueueKit`
-- `packages/kits/ConvergenceKit`
-- `packages/libs/ObserverSink`
-- `packages/libs/LoopbackHTTP`
+| Package | Responsibility | Swift product | Rust crate |
+|---|---|---|---|
+| [`PersistenceKit`](packages/kits/PersistenceKit/docs/OVERVIEW.md) | SQLite, PostgreSQL, and in-memory row, blob, audit, and dataset storage | `PersistenceKit plus a backend product` | `persistence-kit` |
+| [`QueueKit`](packages/kits/QueueKit/docs/OVERVIEW.md) | Durable fill-and-drain background work queue | `QueueKit` | `queuekit` |
+| [`ConvergenceKit`](packages/kits/ConvergenceKit/docs/OVERVIEW.md) | CloudKit, federation, and no-sync convergence engines | `ConvergenceKit plus a transport product` | `convergence-kit` |
+| [`ObserverSink`](packages/libs/ObserverSink/docs/OVERVIEW.md) | Bounded telemetry sink and queryable stats store | `ObserverSink` | `observer-sink` |
+| [`LoopbackHTTP`](packages/libs/LoopbackHTTP/docs/OVERVIEW.md) | Minimal loopback-only HTTP transport | `LoopbackHTTP` | `Swift only` |
 
-Per-package detail lives in `docs/PACKAGE_MAP.md`.
+Start with PersistenceKit and one backend. Add QueueKit, ConvergenceKit, ObserverSink, or LoopbackHTTP only when your host needs them.
 
-## Installation
+## Add it to a project
 
-SwiftPM:
+The Swift package requires Swift 6.2 and declares macOS 26 and iOS 26.
+Add the repository, then select only the products your target uses.
 
 ```swift
-.package(url: "https://github.com/codedaptive/moot-system.git", from: "1.0.32")
+dependencies: [
+    .package(
+        url: "https://github.com/codedaptive/moot-system.git",
+        from: "1.0.32"
+    ),
+],
+targets: [
+    .target(
+        name: "YourTarget",
+        dependencies: [
+            .product(
+                name: "PersistenceKit",
+                package: "moot-system"
+            ),
+        ]
+    ),
+]
 ```
 
-Cargo (git dependency; see `docs/PACKAGE_MAP.md` for crate names):
+The Rust workspace uses edition 2021. Select a concrete crate by package name.
 
 ```toml
 [dependencies]
-<crate-name> = { git = "https://github.com/codedaptive/moot-system", tag = "v1.0.32" }
+persistence-kit = { git = "https://github.com/codedaptive/moot-system", tag = "v1.0.32" }
 ```
 
-## Provenance
+Verify a checkout with both language gates:
+
+```bash
+swift test
+cargo test --workspace --locked
+```
+
+## Documentation
+
+[`docs/README.md`](docs/README.md) is the documentation front door.
+Each package has three maintained views:
+
+- **PersistenceKit:** [overview](packages/kits/PersistenceKit/docs/OVERVIEW.md), [implementation detail](packages/kits/PersistenceKit/docs/DETAILS.md), [AI and maintainer map](packages/kits/PersistenceKit/docs/AGENT_MAP.md)
+- **QueueKit:** [overview](packages/kits/QueueKit/docs/OVERVIEW.md), [implementation detail](packages/kits/QueueKit/docs/DETAILS.md), [AI and maintainer map](packages/kits/QueueKit/docs/AGENT_MAP.md)
+- **ConvergenceKit:** [overview](packages/kits/ConvergenceKit/docs/OVERVIEW.md), [implementation detail](packages/kits/ConvergenceKit/docs/DETAILS.md), [AI and maintainer map](packages/kits/ConvergenceKit/docs/AGENT_MAP.md)
+- **ObserverSink:** [overview](packages/libs/ObserverSink/docs/OVERVIEW.md), [implementation detail](packages/libs/ObserverSink/docs/DETAILS.md), [AI and maintainer map](packages/libs/ObserverSink/docs/AGENT_MAP.md)
+- **LoopbackHTTP:** [overview](packages/libs/LoopbackHTTP/docs/OVERVIEW.md), [implementation detail](packages/libs/LoopbackHTTP/docs/DETAILS.md), [AI and maintainer map](packages/libs/LoopbackHTTP/docs/AGENT_MAP.md)
+
+Use [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) for cross-language gates.
+Use [`docs/DATA_PROVENANCE.md`](docs/DATA_PROVENANCE.md) for artifact origin.
+Use [`SOURCE.md`](SOURCE.md) and [`docs/PUBLISH_REPORT.md`](docs/PUBLISH_REPORT.md)
+to trace this release back to the canonical source.
+
+## What This Repository Is
+
+This repository is a generated public venue for MOOTx01 Framework libraries.
+The code here is Apache-2.0 and is intended for direct use outside the MOOTx01
+product. The publisher records the exact source and load report for every tag.
 
 - Canonical source: `mootx01-ee`
 - Source commit: `6fe29be84ff7ccdae2aaa0dcffb78ecada6076cb`
 - Version: `1.0.32`
 - Generated by: `scripts/lib_publish/publish-libraries.py`
 
-## Brand
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) before proposing changes and
+[`SECURITY.md`](SECURITY.md) for private vulnerability reporting.
 
 MOOTx01 is a registered trademark. Use `MOOTx01 Approved` only for artifacts
 that pass the published conformance and release gates. Independent work that has

@@ -2,13 +2,13 @@
 doc: DETAILS
 package: ObserverSink
 repo: moot-system
-authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
-authored_date: 2026-07-07
+authored_commit: f1c1f3bf8dafd26faf5df26c2ddf2ea909e2df18
+authored_date: 2026-07-23
 sources:
   - path: Sources/ObserverSink/PersistenceStatsSink.swift
     blob: 103d3c53ca69aaef22d4066f11b2655ddb944252
   - path: Sources/ObserverSink/StatsStore.swift
-    blob: 4f4d25a8eeaff0a3998721bb105519815e00eb28
+    blob: d6d9888777838655164ae6c56b6b85577d8e3bca
 ---
 
 # ObserverSink Details
@@ -24,6 +24,11 @@ Older stores with missing source data are migrated carefully.
 Schema v5 adds the composite metric index `(dropbox_id, name, ts)`.
 `queryLatestMetricsByNamesAndDropboxes` uses that index for latest-value reads.
 `queryMetricAggregatesByDropbox` uses it for dashboard counts and timestamps.
+
+`queryMetricsByNames` now accepts an optional limit.
+With a limit it orders by newest timestamp first.
+Without a limit it keeps the earlier ascending full-history behavior.
+This gives callers a bounded latest-value path.
 
 This document walks through both source files in the package. Read
 `OVERVIEW.md` first for the big picture. `PersistenceStatsSink.swift`
@@ -94,6 +99,11 @@ an acceptable cost there. The simpler design is also easier to reason
 about.
 
 ## StatsStore.swift
+
+`queryMetricsByNames` filters one set of names.
+It can also filter one dropbox.
+The optional limit changes the query to newest-first order.
+This avoids loading all matching history for latest-value callers.
 
 This file provides `StatsStore`, the SQLite-backed component that owns
 the telemetry schema. It also provides `StatsStoreSchema`, a namespace of

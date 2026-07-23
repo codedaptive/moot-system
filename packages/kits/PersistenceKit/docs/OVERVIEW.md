@@ -2,8 +2,8 @@
 doc: OVERVIEW
 package: PersistenceKit
 repo: moot-system
-authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
-authored_date: 2026-07-07
+authored_commit: f1c1f3bf8dafd26faf5df26c2ddf2ea909e2df18
+authored_date: 2026-07-23
 sources:
   - path: Sources/PersistenceKit/AuditLog.swift
     blob: ca4c0c9623056a49ad888a7a77e720a7519556bb
@@ -48,7 +48,7 @@ sources:
   - path: Sources/PersistenceKit/SnapshotRegistry.swift
     blob: 88087bda544165c4d24c514a4f3e0641a620512e
   - path: Sources/PersistenceKit/Storage.swift
-    blob: 7484a40913b28cb11a6bd2e3ea822dc8fe8eb63e
+    blob: 1a295d4514389418cb3b59282894718f7168f29b
   - path: Sources/PersistenceKit/StorageError.swift
     blob: 743c2d1a24c7bafedb217e4c6bbf30ca20d03be8
   - path: Sources/PersistenceKit/StorageIntrospection.swift
@@ -68,11 +68,11 @@ sources:
   - path: Sources/PersistenceKitInMemory/InMemoryRowStore.swift
     blob: 2f7c92612c46b8a097e4211147c924f8356e47d1
   - path: Sources/PersistenceKitInMemory/InMemoryStorage.swift
-    blob: 9820c771bfe39ab738eea1f3b1623491fcfb1326
+    blob: fb296fd7f23bf049cc4ee9dfcaedd145fe1daeb5
   - path: Sources/PersistenceKitInMemory/PredicateEvaluator.swift
-    blob: e8735422ff87addff6a2a3a89da85c495d07f07c
+    blob: ae063f71755c1d2b958fb804a3e898db3c53965b
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLConnection.swift
-    blob: 5a282a6064a69a543a5d650ccc7eeeae2c5a3e4f
+    blob: e4d687ebae5366425d7a43e6d453cb55c4f6d025
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLIdentifierValidator.swift
     blob: 120cf0c1576a7db45d79bf6865e2f15cff09a5ac
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLPool.swift
@@ -82,7 +82,7 @@ sources:
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLSchema.swift
     blob: f165f0877b96c87e2f7de46012f8f8acb3c03cc8
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLStorage.swift
-    blob: 305d1983d13862e2f10176999aff2477eab0f28e
+    blob: edbc418ea47d03ace0af25a870f095c33462e508
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLStores.swift
     blob: f24f390efe6066f2730f3a5b9117ec8038fd0b0d
   - path: Sources/PersistenceKitReplication/IncrementalReplicationSession.swift
@@ -102,11 +102,19 @@ sources:
   - path: Sources/PersistenceKitSQLite/SQLitePredicateCompiler.swift
     blob: 5770adb2024c54ea6921651632ca65ee84d416af
   - path: Sources/PersistenceKitSQLite/SQLiteSchema.swift
-    blob: 4ba6fc175fe9d486b17af1088a23da64041b12ae
+    blob: b7155d602f43d0cff3e3c0d6fba74a184eda0378
   - path: Sources/PersistenceKitSQLite/SQLiteStorage.swift
-    blob: d4b4e9c7c3229dbfd29df0453456f7b9bd2cb9c6
+    blob: 0b7f1293af172d471057a7298c40a1ca24421691
   - path: Sources/PersistenceKitSQLite/SQLiteStores.swift
     blob: 76499ffb70d979f0d13e8cf9e32bc38ff28ffdb5
+  - path: Sources/PersistenceKit/DatasetStore.swift
+    blob: 9bb1962726f05bcaecc060a44f205b03a37c32df
+  - path: Sources/PersistenceKitInMemory/InMemoryDatasetStore.swift
+    blob: 91fbd32c86c8ba26f2da79c130505e94bd7a31a0
+  - path: Sources/PersistenceKitPostgreSQL/PostgreSQLDatasetStore.swift
+    blob: e5c1f22b481d0af5eb02527d54030f70b74384c9
+  - path: Sources/PersistenceKitSQLite/SQLiteDatasetStore.swift
+    blob: 8d200d1b465132aa9625492f4f8a403b9fd3e1d2
 ---
 
 # PersistenceKit Overview
@@ -123,6 +131,12 @@ SQLite database files are set to owner-only permissions.
 Key PRAGMA errors no longer echo key material.
 Transaction commits now clear present-read cache entries.
 
+The storage contract now includes `DatasetStore`.
+It creates typed user tables with safe column names.
+It supports bulk append, filtered query, column stats, and table drop.
+SQLite, PostgreSQL, and in-memory backends implement the same surface.
+Text comparison uses UTF-8 byte order across every backend and language.
+
 ## What This Library Does
 
 PersistenceKit is the storage layer for MOOTx01. MOOTx01 is an on-device
@@ -135,9 +149,10 @@ what a memory means. That job belongs to a higher kit. PersistenceKit
 decides how a memory is written, read, and kept safe. It takes over
 once another kit hands the memory over as typed rows and bytes.
 
-PersistenceKit gives every higher kit the same four operations. A kit
+PersistenceKit gives every higher kit the same core operations. A kit
 can insert a row. A kit can fetch a blob. A kit can append an audit
-event. A kit can watch a table for changes. This holds true no matter
+event. A kit can watch a table for changes. It can also manage typed
+user datasets. This holds true no matter
 which physical engine sits underneath. The engine can be SQLite on a
 phone. It can be PostgreSQL on a shared server. It can also be a plain
 in-memory table for a unit test. The calling kit writes the same code
@@ -222,7 +237,12 @@ Any backend can use these without changing its own code.
 - `HashingRowStore` wraps a `RowStore` and computes a content hash on
   every write to a table marked hashable. It then reports the write up
   a parent chain, so a Merkle-style integrity tree can stay current
-  without a full rescan.
+without a full rescan.
+
+`DatasetStore` is a separate shaped surface on each backend.
+Each dataset gets one table derived from its UUID.
+User column names pass one strict identifier gate.
+Queries reuse the normal predicate and ordering types.
 - `RowCrypto` and its write and read seam functions apply per-row
   AES-GCM encryption to a table's `content` column. This runs whenever
   an estate is configured for row-level encryption, independent of

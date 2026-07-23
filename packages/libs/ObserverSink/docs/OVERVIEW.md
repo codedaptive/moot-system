@@ -2,13 +2,13 @@
 doc: OVERVIEW
 package: ObserverSink
 repo: moot-system
-authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
-authored_date: 2026-07-07
+authored_commit: f1c1f3bf8dafd26faf5df26c2ddf2ea909e2df18
+authored_date: 2026-07-23
 sources:
   - path: Sources/ObserverSink/PersistenceStatsSink.swift
     blob: 103d3c53ca69aaef22d4066f11b2655ddb944252
   - path: Sources/ObserverSink/StatsStore.swift
-    blob: 4f4d25a8eeaff0a3998721bb105519815e00eb28
+    blob: d6d9888777838655164ae6c56b6b85577d8e3bca
 ---
 
 # ObserverSink Overview
@@ -22,6 +22,11 @@ It keeps monitoring on by default unless a user setting says otherwise.
 
 The metric store has new indexed query helpers.
 They fetch the latest value and per-dropbox counts without scanning millions of rows.
+
+Named metric queries now accept a limit.
+A limited query reads newest samples first.
+This bounds dashboard work on long-lived metric stores.
+The unlimited form keeps its earlier full-history order.
 
 ## What This Library Does
 

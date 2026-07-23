@@ -1,0 +1,35 @@
+# MOOT System
+
+Apache-2.0 public SDK repository in the MOOTx01 Framework.
+Current release: v1.0.32
+Repository: https://github.com/codedaptive/moot-system
+
+Choose this repository when: You need storage backends, user-defined datasets, durable queues, synchronization, telemetry persistence, or a small loopback HTTP server.
+
+## Packages
+
+- PersistenceKit: SQLite, PostgreSQL, and in-memory row, blob, audit, and dataset storage; Swift `PersistenceKit plus a backend product`; Rust `persistence-kit`; docs `packages/kits/PersistenceKit/docs/OVERVIEW.md`
+- QueueKit: Durable fill-and-drain background work queue; Swift `QueueKit`; Rust `queuekit`; docs `packages/kits/QueueKit/docs/OVERVIEW.md`
+- ConvergenceKit: CloudKit, federation, and no-sync convergence engines; Swift `ConvergenceKit plus a transport product`; Rust `convergence-kit`; docs `packages/kits/ConvergenceKit/docs/OVERVIEW.md`
+- ObserverSink: Bounded telemetry sink and queryable stats store; Swift `ObserverSink`; Rust `observer-sink`; docs `packages/libs/ObserverSink/docs/OVERVIEW.md`
+- LoopbackHTTP: Minimal loopback-only HTTP transport; Swift `LoopbackHTTP`; Rust `Swift only`; docs `packages/libs/LoopbackHTTP/docs/OVERVIEW.md`
+
+## Documentation
+
+- Human documentation index: docs/README.md
+- Exact package map: docs/PACKAGE_MAP.md
+- Repository dependency graph: docs/DEPENDENCY_GRAPH.md
+- Conformance contract: docs/CONFORMANCE.md
+- Source provenance: SOURCE.md and docs/PUBLISH_REPORT.md
+- Security policy: SECURITY.md
+
+## SDK family
+
+- https://github.com/codedaptive/moot-memory: Structured memory, vector search, and local RAG
+- https://github.com/codedaptive/moot-semantics: ARIA vocabulary and deterministic local classification
+- https://github.com/codedaptive/moot-system: Storage, datasets, queues, sync, telemetry, and loopback HTTP
+- https://github.com/codedaptive/moot-core: Shared types, kernel, fingerprints, lifecycle rules, and memory math
+
+Do not infer that every MOOTx01 product package is Apache-2.0.
+Only code obtained from these four public SDK repositories carries their
+Apache-2.0 venue license.

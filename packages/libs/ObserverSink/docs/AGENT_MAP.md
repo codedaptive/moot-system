@@ -2,13 +2,13 @@
 doc: AGENT_MAP
 package: ObserverSink
 repo: moot-system
-authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
-authored_date: 2026-07-07
+authored_commit: f1c1f3bf8dafd26faf5df26c2ddf2ea909e2df18
+authored_date: 2026-07-23
 sources:
   - path: Sources/ObserverSink/PersistenceStatsSink.swift
     blob: 103d3c53ca69aaef22d4066f11b2655ddb944252
   - path: Sources/ObserverSink/StatsStore.swift
-    blob: 4f4d25a8eeaff0a3998721bb105519815e00eb28
+    blob: d6d9888777838655164ae6c56b6b85577d8e3bca
 ---
 
 # AGENT_MAP: ObserverSink
@@ -28,6 +28,8 @@ ENTRY POINTS (most callers need only these):
 - StatsStore.swift:384 `open() async throws`: apply schema/migrations + seed control rows (idempotent)
 
 ## Symbol Table
+
+- StatsStore.swift `queryMetricsByNames(_:dropboxID:limit:)`: optional bounded newest-first query; nil limit preserves ascending full history.
 
 ### Sink: PersistenceStatsSink.swift
 - :77 `struct PersistenceStatsSink: StatsSink`: Sendable; all mutable state lives in StatsStore, not here

@@ -3,11 +3,11 @@
 doc: topology
 package: PersistenceKit
 repo: moot-system
-authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
-authored_date: 2026-07-07
+authored_commit: f1c1f3bf8dafd26faf5df26c2ddf2ea909e2df18
+authored_date: 2026-07-23
 sources:
   - path: Sources/PersistenceKit/Storage.swift
-    blob: 7484a40913b28cb11a6bd2e3ea822dc8fe8eb63e
+    blob: 1a295d4514389418cb3b59282894718f7168f29b
   - path: Sources/PersistenceKit/RowStore.swift
     blob: 9a96ff89528ca786d51224324cacb78cf810037d
   - path: Sources/PersistenceKit/CachingRowStore.swift
@@ -21,17 +21,25 @@ sources:
   - path: Sources/PersistenceKit/SnapshotRegistry.swift
     blob: 88087bda544165c4d24c514a4f3e0641a620512e
   - path: Sources/PersistenceKitSQLite/SQLiteStorage.swift
-    blob: d4b4e9c7c3229dbfd29df0453456f7b9bd2cb9c6
+    blob: 0b7f1293af172d471057a7298c40a1ca24421691
   - path: Sources/PersistenceKitSQLite/KeychainKeyStore.swift
     blob: 0071732291a7cb6ce0777bd230a6188276fb4f32
   - path: Sources/PersistenceKitPostgreSQL/PostgreSQLStorage.swift
-    blob: 305d1983d13862e2f10176999aff2477eab0f28e
+    blob: edbc418ea47d03ace0af25a870f095c33462e508
   - path: Sources/PersistenceKitInMemory/InMemoryStorage.swift
-    blob: 9820c771bfe39ab738eea1f3b1623491fcfb1326
+    blob: fb296fd7f23bf049cc4ee9dfcaedd145fe1daeb5
   - path: Sources/PersistenceKitReplication/StorageReplicator.swift
     blob: f5acc5993c8647e53c127c6871a1282c24b1c427
   - path: Sources/PersistenceKitReplication/IncrementalReplicationSession.swift
     blob: 2f90378146e043d75c739d400d98c7770e07af78
+  - path: Sources/PersistenceKit/DatasetStore.swift
+    blob: 9bb1962726f05bcaecc060a44f205b03a37c32df
+  - path: Sources/PersistenceKitInMemory/InMemoryDatasetStore.swift
+    blob: 91fbd32c86c8ba26f2da79c130505e94bd7a31a0
+  - path: Sources/PersistenceKitPostgreSQL/PostgreSQLDatasetStore.swift
+    blob: e5c1f22b481d0af5eb02527d54030f70b74384c9
+  - path: Sources/PersistenceKitSQLite/SQLiteDatasetStore.swift
+    blob: 8d200d1b465132aa9625492f4f8a403b9fd3e1d2
 -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1000" height="700" viewBox="0 0 1000 700" font-family="Helvetica, Arial, sans-serif">
   <defs>

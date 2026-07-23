@@ -2,8 +2,8 @@
 doc: OVERVIEW
 package: ConvergenceKit
 repo: moot-system
-authored_commit: 3c3ce06528a1d1b3b6e9aa8a6008cba20a243c23
-authored_date: 2026-07-07
+authored_commit: f1c1f3bf8dafd26faf5df26c2ddf2ea909e2df18
+authored_date: 2026-07-23
 sources:
   - path: Sources/ConvergenceKit/SyncEngine.swift
     blob: 32e69e0ea5002d8b699866183371527f675023cd
@@ -14,11 +14,11 @@ sources:
   - path: Sources/ConvergenceKitCloudKit/CKRecordMapping.swift
     blob: 9b61903296533f8044bee5a4f93ca2dc1b76b653
   - path: Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift
-    blob: 0ea4d12140516ad32d6edb1b910c2c0cc920c46e
+    blob: a6f9215f2502a6b6bf382fb0d15f87f1f0c22da7
   - path: Sources/ConvergenceKitFederation/FederationIdentity.swift
     blob: b64358fe36fd241049e9f5bdbbb335f1f3d29464
   - path: Sources/ConvergenceKitFederation/FederationSyncEngine.swift
-    blob: 9bf722f8e7fc24ae12ac72d571c135da2b40af62
+    blob: 413408bb31abb9079f767e2926f0c86eb7f829d6
   - path: Sources/ConvergenceKitFederation/HyperplaneFamilyExchange.swift
     blob: 4880e847918c253f3d99a02fdd65c15f172d32e1
   - path: Sources/ConvergenceKitNone/ConvergenceKitNone.swift
@@ -33,6 +33,11 @@ CloudKit last-writer-wins now stores sync HLC data in `_ck_sync_meta`.
 The app row stays clean.
 The side table lets the engine compare remote HLC values across all backends.
 It checks the remote row before it applies an inbound write.
+
+CloudKit now creates its sync side table through the storage schema path.
+The table exists before the first pull.
+Federation now verifies every envelope with the paired peer key.
+The sender-controlled key field cannot become its own trust anchor.
 
 ## What This Library Does
 
