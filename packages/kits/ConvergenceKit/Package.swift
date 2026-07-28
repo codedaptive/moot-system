@@ -7,8 +7,8 @@
 // ecosystem), Federation (substrate-native CRDT exchange),
 // None (single-device passthrough).
 //
-// Design per DECISION_SYNCKIT_DESIGN_2026-05-19.md.
-// Eleven-kit graph per DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md.
+// Design per the ConvergenceKit replication surface.
+// Eleven-kit graph per current kit ownership.
 
 import PackageDescription
 
@@ -85,7 +85,13 @@ let package = Package(
         // Test targets.
         .testTarget(
             name: "ConvergenceKitTests",
-            dependencies: ["ConvergenceKit", "SubstrateTypes"],
+            dependencies: [
+                "ConvergenceKit",
+                "SubstrateTypes",
+                // SkewQueueTests uses InMemoryStorage to exercise PendingSkewQueue
+                // and SkewReplay in isolation (CVK-ICLOUD P3-M4).
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+            ],
             path: "Tests/ConvergenceKitTests"
         ),
         .testTarget(
@@ -113,6 +119,10 @@ let package = Package(
             dependencies: [
                 "ConvergenceKit",
                 "ConvergenceKitFederation",
+                // P5-M1b: needed to call CKSideSchema.ensure in retention tests that
+                // verify OutboxStore.deleteMatchingParked works when the CK outbox table
+                // exists on a storage instance also used by the Federation backend.
+                "ConvergenceKitCloudKit",
                 "ConvergenceKitConformance",
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
             ],

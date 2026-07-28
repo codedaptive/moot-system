@@ -24,7 +24,7 @@ let package = Package(
         .library(name: "ObserverSink", targets: ["ObserverSink"])
     ],
     dependencies: [
-        .package(url: "https://github.com/codedaptive/moot-core.git", exact: "1.0.32"),
+        .package(url: "https://github.com/codedaptive/moot-core.git", exact: "1.0.35"),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.21.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.25.0")
@@ -57,7 +57,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ConvergenceKitTests",
-            dependencies: ["ConvergenceKit", .product(name: "SubstrateTypes", package: "moot-core")],
+            dependencies: ["ConvergenceKit", .product(name: "SubstrateTypes", package: "moot-core"), "PersistenceKitInMemory"],
             path: "packages/kits/ConvergenceKit/Tests/ConvergenceKitTests"
         ),
         .testTarget(
@@ -72,7 +72,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ConvergenceKitFederationTests",
-            dependencies: ["ConvergenceKit", "ConvergenceKitFederation", "ConvergenceKitConformance", "PersistenceKitInMemory"],
+            dependencies: ["ConvergenceKit", "ConvergenceKitFederation", "ConvergenceKitCloudKit", "ConvergenceKitConformance", "PersistenceKitInMemory"],
             path: "packages/kits/ConvergenceKit/Tests/ConvergenceKitFederationTests"
         ),
         .target(

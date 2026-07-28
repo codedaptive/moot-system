@@ -1,6 +1,6 @@
 // GCPinTests.swift
 //
-// Tests for GC pin via snapshot-registry minimum HLC (ADR-017 §15).
+// Tests for GC pin via snapshot-registry minimum HLC.
 
 import Testing
 import Foundation

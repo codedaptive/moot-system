@@ -12,7 +12,7 @@
 //! without one it is skipped. Implements RowStore, BlobStore, AuditLog,
 //! StorageObserver + schema/generated-STORED-columns/append-only. The
 //! backend owns no vector-search engine; it accommodates vector workloads'
-//! storage needs through RowStore/BlobStore (ADR-008).
+//! storage needs through RowStore/BlobStore.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -30,8 +30,8 @@ use uuid::Uuid;
 
 use crate::{
     AesGcmAeadProvider, AuditEvent, AuditLog, BackendConfiguration, BlobStore, CachingRowStore,
-    ColumnType, EstateConfiguration, EstateEncryptionConfig, IndexDeclaration, IsolationLevel,
-    OrderClause, OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration,
+    ChangeOrigin, ColumnType, EstateConfiguration, EstateEncryptionConfig, IndexDeclaration,
+    IsolationLevel, OrderClause, OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration,
     Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult,
     StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue,
 };
@@ -61,7 +61,7 @@ fn to_param(v: &TypedValue) -> PgParam {
         TypedValue::Blob(b) => Box::new(b.clone()),
         TypedValue::Json(b) => Box::new(b.clone()),
         TypedValue::Uuid(u) => Box::new(*u),
-        // Timestamp is epoch MILLISECONDS (ADR-023) — bind through the
+        // Timestamp is epoch MILLISECONDS — bind through the
         // millisecond constructor so the TIMESTAMPTZ carries sub-second
         // precision, matching Swift and the SQLite backend.
         TypedValue::Timestamp(ms) => Box::new(
@@ -113,7 +113,7 @@ fn read_value(row: &postgres::Row, idx: usize, kit: Option<ColumnType>) -> Typed
             .try_get::<_, Option<DateTime<Utc>>>(idx)
             .ok()
             .flatten()
-            // Timestamp is epoch MILLISECONDS (ADR-023).
+            // Timestamp is epoch MILLISECONDS.
             .map(|dt| TypedValue::Timestamp(dt.timestamp_millis()))
             .unwrap_or(TypedValue::Null),
         Some(ColumnType::Bool) => row
@@ -595,7 +595,7 @@ impl Pool {
     /// no plaintext fallback) instead of silently overwriting it with `prefer`.
     ///
     /// Transport is `postgres-native-tls = "0.5"` (C-1 exception approved:
-    /// `DECISION_RUST_POSTGRES_TLS_CRATE_2026-06-28.md`). It wraps the
+    /// `the Rust PostgreSQL TLS seam`). It wraps the
     /// platform TLS stack (Security.framework / SChannel / OpenSSL) rather
     /// than bundling a cryptographic implementation.
     fn open_connection(conn_str: &str, namespace: &str) -> StorageResult<Client> {
@@ -951,6 +951,32 @@ fn apply_schema(
 }
 
 impl Storage for PostgresStorage {
+    /// PostgreSQL page reclamation is server-managed (autovacuum); the
+    /// client cannot meaningfully estimate reclaimable bytes without
+    /// superuser-level pgstattuple access, so the estimate is 0 (explicit
+    /// per-backend contract, mirrors the Swift conformance).
+    fn estimated_reclaimable_bytes(
+        &self,
+    ) -> Result<i64, crate::maintenance::MaintenanceError> {
+        Ok(0)
+    }
+
+    /// Explicit no-op: dead-tuple reclamation and WAL recycling are the
+    /// server's responsibility (autovacuum / checkpointer). Client-driven
+    /// VACUUM FULL takes an ACCESS EXCLUSIVE lock and is an operator
+    /// decision, not a substrate maintenance primitive.
+    fn perform_maintenance(
+        &self,
+        _progress: Option<&(dyn Fn(crate::maintenance::MaintenanceProgress) + Send + Sync)>,
+        _should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<crate::maintenance::MaintenanceReport, crate::maintenance::MaintenanceError>
+    {
+        Ok(crate::maintenance::MaintenanceReport::no_op(
+            "postgresql",
+            "physical reclamation is server-managed (autovacuum); no client-side maintenance is performed",
+        ))
+    }
+
     fn configuration(&self) -> &EstateConfiguration {
         &self.config
     }
@@ -1351,6 +1377,9 @@ impl RowStore for TxRowStore {
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
+            // Postgres backend does not implement pre-read diff; nil = unknown/all (CVK-WB4).
+            changed_columns: None,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1420,6 +1449,9 @@ impl RowStore for TxRowStore {
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
+            // Postgres backend does not implement pre-read diff; nil = unknown/all (CVK-WB4).
+            changed_columns: None,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1467,6 +1499,9 @@ impl RowStore for TxRowStore {
                 row_key: None,
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
+                // Postgres backend does not implement pre-read diff; nil = unknown/all (CVK-WB4).
+                changed_columns: None,
             });
         }
         Ok(changed as usize)
@@ -1495,6 +1530,9 @@ impl RowStore for TxRowStore {
                 row_key: None,
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
+                // Delete carries no column-level granularity; nil = unknown/all (CVK-WB4).
+                changed_columns: None,
             });
         }
         Ok(changed as usize)
@@ -1899,6 +1937,20 @@ struct PgRowStore {
     encryption_config: EstateEncryptionConfig,
 }
 
+/// Derive the outbound `RowKey` for a just-written row from its column
+/// values, using the schema-declared primary key for `table`.
+///
+/// Single-column PK only (composite/multi-column PKs fall through to the
+/// random-mint default below — unchanged, out of gap-5's scope, Kong's
+/// guard). For a `.uuid`-typed PK, the value itself IS the key (unchanged
+/// fast path). For a `.text`-typed PK, gap 5: previously this branch did
+/// not exist at all on this Postgres backend — every `.text`-PK row
+/// (including a UUID-shaped one) got a fresh random `RowKey`, forking row
+/// identity between the row actually persisted and what observers/
+/// ConvergenceKit's federation gate saw. `row_key_derivation::
+/// deterministic_row_key` parses a UUID-shaped string directly, or derives
+/// a stable UUID from SHA-256 of the string otherwise — see
+/// `row_key_derivation.rs` for the full rationale.
 fn extract_row_key(
     schema: Option<&SchemaDeclaration>,
     table: &str,
@@ -1906,8 +1958,10 @@ fn extract_row_key(
 ) -> RowKey {
     if let Some(decl) = schema.and_then(|s| s.tables.iter().find(|t| t.name == table)) {
         if decl.primary_key.len() == 1 {
-            if let Some(TypedValue::Uuid(u)) = values.get(&decl.primary_key[0]) {
-                return *u;
+            match values.get(&decl.primary_key[0]) {
+                Some(TypedValue::Uuid(u)) => return *u,
+                Some(TypedValue::Text(s)) => return crate::row_key_derivation::deterministic_row_key(s),
+                _ => {}
             }
         }
     }
@@ -1975,6 +2029,9 @@ impl RowStore for PgRowStore {
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
+            // Postgres backend does not implement pre-read diff; nil = unknown/all (CVK-WB4).
+            changed_columns: None,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -2042,6 +2099,9 @@ impl RowStore for PgRowStore {
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
+            // Postgres backend does not implement pre-read diff; nil = unknown/all (CVK-WB4).
+            changed_columns: None,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -2089,6 +2149,9 @@ impl RowStore for PgRowStore {
                 row_key: None,
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
+                // Postgres backend does not implement pre-read diff; nil = unknown/all (CVK-WB4).
+                changed_columns: None,
             });
         }
         Ok(changed as usize)
@@ -2116,6 +2179,9 @@ impl RowStore for PgRowStore {
                 row_key: None,
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
+                // Delete carries no column-level granularity; nil = unknown/all (CVK-WB4).
+                changed_columns: None,
             });
         }
         Ok(changed as usize)

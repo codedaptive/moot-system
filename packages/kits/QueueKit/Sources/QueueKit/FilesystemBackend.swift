@@ -345,7 +345,7 @@ public final class FilesystemBackend: QueueBackend, @unchecked Sendable {
         return (try? fm.contentsOfDirectory(atPath: newDir.path).count) ?? 0
     }
 
-    // MARK: - Stream-scoped drain (ADR-021 Decision 7 / T1)
+    // MARK: - Stream-scoped drain
 
     /// Claim and return only the pending jobs that belong to `stream`.
     ///
@@ -510,7 +510,7 @@ public final class FilesystemBackend: QueueBackend, @unchecked Sendable {
     ///
     /// Safe to call ONLY at mount, when no drain session is live: a freshly
     /// started process owns no in-flight work, so every entry in `cur/` is a crash
-    /// orphan from a previous run. With one writer per estate (ADR-LOOPBACKHTTP-001),
+    /// orphan from a previous run. With one writer per estate,
     /// that precondition holds. Returns the number of jobs reclaimed.
     @discardableResult
     public func reclaimInFlight() async throws -> Int {

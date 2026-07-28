@@ -7,7 +7,7 @@
 //! Implements RowStore, BlobStore, AuditLog, and StorageObserver plus
 //! schema/migrations/generated-columns/append-only. The backend owns no
 //! vector-search engine; it accommodates vector workloads' storage needs
-//! through RowStore/BlobStore (ADR-008).
+//! through RowStore/BlobStore.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str;
@@ -23,9 +23,10 @@ use uuid::Uuid;
 use crate::{
     AeadProvider, AesGcmAeadProvider, AuditEvent, AuditLog, BackendConfiguration, BlobStore,
     CachingRowStore, ColumnType, EstateConfiguration, EstateEncryptionConfig,
-    IndexDeclaration, IsolationLevel, OrderClause, OrderDirection, RowHandle, RowKey, RowStore,
-    SchemaDeclaration, Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate,
-    StorageResult, StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue,
+    ChangeOrigin, IndexDeclaration, IsolationLevel, OrderClause, OrderDirection, RowHandle,
+    RowKey, RowStore, SchemaDeclaration, Storage, StorageError, StorageEvent, StorageObserver,
+    StoragePredicate, StorageResult, StorageRow, StorageTransaction, TableChange,
+    TableDeclaration, TypedValue,
 };
 use crate::error::validate_sql_identifier;
 
@@ -357,9 +358,10 @@ const BLOB_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_blobs" (
   "bytes" BLOB NOT NULL
 )"#;
 
-// Rust-shaped audit table: holds the Rust AuditEvent fields. `hlc` is the
-// packed integer (PK + ordering, order-preserving by HLC); the three
-// component columns let events reconstruct without an unpack dependency.
+// Canonical audit table shared with the Swift estate format. Rust keeps the
+// descriptive AuditEvent field names in memory, but persists the established
+// short on-disk names. `hlc` is the packed integer (PK); the three component
+// columns preserve full-precision chronological ordering.
 // `reason` is nullable TEXT — None persists as NULL; old rows without a
 // reason read back as None (schema not frozen, no migration needed).
 const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
@@ -371,16 +373,16 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
   "estate_uuid" TEXT NOT NULL,
   "row_id" TEXT NOT NULL,
   "verb" TEXT NOT NULL,
-  "before_adjective" INTEGER,
-  "before_operational" INTEGER,
-  "before_provenance" INTEGER,
-  "after_adjective" INTEGER NOT NULL,
-  "after_operational" INTEGER NOT NULL,
-  "after_provenance" INTEGER NOT NULL,
-  "before_lattice_anchor" INTEGER,
-  "after_lattice_anchor" INTEGER NOT NULL,
-  "before_lattice_qid" INTEGER,
-  "after_lattice_qid" INTEGER NOT NULL DEFAULT 0,
+  "before_adj" INTEGER,
+  "before_op" INTEGER,
+  "before_pv" INTEGER,
+  "after_adj" INTEGER NOT NULL,
+  "after_op" INTEGER NOT NULL,
+  "after_pv" INTEGER NOT NULL,
+  "before_udc" INTEGER,
+  "after_udc" INTEGER NOT NULL,
+  "before_qid" INTEGER,
+  "after_qid" INTEGER NOT NULL DEFAULT 0,
   "actor" TEXT NOT NULL,
   "reason" TEXT,
   PRIMARY KEY ("event_id", "hlc")
@@ -394,12 +396,41 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
 const AUDIT_INDEX: &str = r#"CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_chrono" ON "_storagekit_audit" ("row_id", "physical_time", "logical_count", "node_id")"#;
 const AUDIT_DROP_PACKED_INDEX: &str = r#"DROP INDEX IF EXISTS "_storagekit_audit_row_hlc""#;
 
+/// Render a TypedValue as a SQLite literal for DEFAULT clauses. Mirrors
+/// Swift `SQLiteSchemaEmitter.literalSQL` — only trivial cases; complex
+/// defaults render NULL. (Layout parity, GLK shared-content 1.1 P0: the
+/// Rust emitter previously DROPPED declared defaults, so Rust-created
+/// estates lacked the `DEFAULT 0` Swift-created estates carry on bitmap
+/// columns.)
+fn default_literal_sql(v: &TypedValue) -> String {
+    match v {
+        TypedValue::Null => "NULL".to_string(),
+        TypedValue::Bool(b) => {
+            if *b {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            }
+        }
+        TypedValue::Int(i) => i.to_string(),
+        TypedValue::Bitmap(i) => i.to_string(),
+        TypedValue::Float(d) => d.to_string(),
+        TypedValue::Text(s) => format!("'{}'", s.replace('\'', "''")),
+        TypedValue::Uuid(u) => format!("'{}'", u.to_string().to_uppercase()),
+        TypedValue::Hlc(h) => (h.packed() as i64).to_string(),
+        _ => "NULL".to_string(),
+    }
+}
+
 fn create_table_sql(decl: &TableDeclaration) -> String {
     let mut parts: Vec<String> = Vec::new();
     for col in &decl.columns {
         let mut line = format!("\"{}\" {}", col.name, native_type(col.column_type));
         if !col.nullable {
             line.push_str(" NOT NULL");
+        }
+        if let Some(ref dv) = col.default_value {
+            line.push_str(&format!(" DEFAULT {}", default_literal_sql(dv)));
         }
         parts.push(line);
     }
@@ -864,17 +895,143 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
     for index in &schema.indices {
         exec(&create_index_sql(index))?;
     }
-    // Record the schema version (kit-scoped).
-    conn.execute(
-        r#"INSERT INTO "_storagekit_migrations" ("kit_id", "version", "applied_at") VALUES (?, ?, ?)
-           ON CONFLICT("kit_id") DO UPDATE SET "version" = excluded.version, "applied_at" = excluded.applied_at"#,
-        params_from_iter(vec![
-            SqlValue::Text(schema.kit_id.clone()),
-            SqlValue::Integer(schema.version as i64),
-            SqlValue::Text(iso8601(0)),
-        ]),
-    )
-    .map_err(|e| StorageError::BackendError { underlying: format!("record version: {e}") })?;
+
+    // Execute pending DECLARED migration steps (Swift `applyMigrations`
+    // parity — GLK shared-content 1.1 P4 closed the gap where this backend
+    // silently ignored `SchemaDeclaration.migrations`, so declared
+    // dropTable/addColumn retirements never ran on Rust SQLite estates).
+    let record_version = |conn: &rusqlite::Connection, version: i32| -> StorageResult<()> {
+        conn.execute(
+            r#"INSERT INTO "_storagekit_migrations" ("kit_id", "version", "applied_at") VALUES (?, ?, ?)
+               ON CONFLICT("kit_id") DO UPDATE SET "version" = excluded.version, "applied_at" = excluded.applied_at"#,
+            params_from_iter(vec![
+                SqlValue::Text(schema.kit_id.clone()),
+                SqlValue::Integer(version as i64),
+                SqlValue::Text(iso8601(0)),
+            ]),
+        )
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("record version: {e}"),
+        })
+        .map(|_| ())
+    };
+    let current_version = |conn: &rusqlite::Connection| -> i32 {
+        conn.query_row(
+            r#"SELECT "version" FROM "_storagekit_migrations" WHERE "kit_id" = ?"#,
+            [schema.kit_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v as i32)
+        .unwrap_or(0)
+    };
+
+    let current = current_version(conn);
+    if current < schema.version {
+        let mut pending: Vec<&crate::schema::Migration> = schema
+            .migrations
+            .iter()
+            .filter(|m| m.from_version >= current && m.to_version <= schema.version)
+            .collect();
+        pending.sort_by_key(|m| m.from_version);
+        for migration in pending {
+            for op in &migration.operations {
+                apply_migration_operation(conn, op)?;
+            }
+            record_version(conn, migration.to_version)?;
+        }
+        let final_version = current_version(conn);
+        if final_version < schema.version {
+            record_version(conn, schema.version)?;
+        }
+    }
+
+    // Keep the accumulated schema view coherent with dropped tables.
+    if let Some(existing) = &mut inner.schema {
+        let dropped: Vec<String> = schema
+            .migrations
+            .iter()
+            .flat_map(|m| m.operations.iter())
+            .filter_map(|op| match op {
+                crate::schema::SchemaOperation::DropTable { name } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        if !dropped.is_empty() {
+            existing.tables.retain(|t| !dropped.contains(&t.name));
+        }
+    }
+    Ok(())
+}
+
+/// Execute one declared migration operation (Swift `applyOperation` parity).
+fn apply_migration_operation(
+    conn: &rusqlite::Connection,
+    op: &crate::schema::SchemaOperation,
+) -> StorageResult<()> {
+    use crate::schema::SchemaOperation as Op;
+    let exec = |sql: &str| {
+        conn.execute_batch(sql)
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("migration ddl: {e}"),
+            })
+    };
+    match op {
+        Op::CreateTable(decl) => {
+            exec(&create_table_sql(decl))?;
+            for trigger in append_only_triggers(decl) {
+                exec(&trigger)?;
+            }
+        }
+        Op::DropTable { name } => exec(&format!("DROP TABLE IF EXISTS \"{name}\""))?,
+        Op::AddColumn { table, column } => {
+            // Idempotent: skip when present (fresh DBs create the latest
+            // layout before replaying migrations).
+            let exists: bool = conn
+                .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+                .and_then(|mut stmt| {
+                    let mut rows = stmt.query([])?;
+                    while let Some(row) = rows.next()? {
+                        let name: String = row.get(1)?;
+                        if name == column.name {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                })
+                .unwrap_or(false);
+            if !exists {
+                let mut sql = format!(
+                    "ALTER TABLE \"{table}\" ADD COLUMN \"{}\" {}",
+                    column.name,
+                    native_type(column.column_type)
+                );
+                if !column.nullable {
+                    sql.push_str(" NOT NULL DEFAULT ");
+                    sql.push_str(&default_literal_sql(
+                        column.default_value.as_ref().unwrap_or(&TypedValue::Null),
+                    ));
+                }
+                exec(&sql)?;
+            }
+        }
+        Op::DropColumn { table, column_name } => {
+            exec(&format!(
+                "ALTER TABLE \"{table}\" DROP COLUMN \"{column_name}\""
+            ))?
+        }
+        Op::RenameColumn { table, from, to } => {
+            exec(&format!(
+                "ALTER TABLE \"{table}\" RENAME COLUMN \"{from}\" TO \"{to}\""
+            ))?
+        }
+        Op::AddIndex(decl) => exec(&create_index_sql(decl))?,
+        Op::DropIndex { name } => exec(&format!("DROP INDEX IF EXISTS \"{name}\""))?,
+        Op::Custom { sqlite, .. } => {
+            if let Some(sql) = sqlite {
+                exec(sql)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1018,6 +1175,203 @@ impl Storage for SqliteStorage {
             inner: self.inner.clone(),
         }))
     }
+
+    /// Freelist pages × page size, plus the WAL file's current size — the
+    /// filesystem bytes a checkpoint + VACUUM pass would release. Read-only
+    /// (two PRAGMAs + one file stat); safe for status polling. Mirrors the
+    /// Swift `SQLiteBackend.maintenanceEstimatedReclaimableBytes`.
+    fn estimated_reclaimable_bytes(
+        &self,
+    ) -> Result<i64, crate::maintenance::MaintenanceError> {
+        use crate::maintenance::MaintenanceError as ME;
+        let guard = self.inner.lock().unwrap();
+        let pragma = |name: &str| -> Result<i64, ME> {
+            guard
+                .conn
+                .query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+                .map_err(|e| ME::BackendFailure {
+                    reason: format!("pragma {name}: {e}"),
+                })
+        };
+        let page_size = pragma("page_size")?;
+        let freelist = pragma("freelist_count")?;
+        let path = match &self.config.backend {
+            BackendConfiguration::Sqlite { path, .. } => path.clone(),
+            _ => String::new(),
+        };
+        Ok(freelist * page_size + maintenance_file_bytes(&format!("{path}-wal")))
+    }
+
+    /// WAL checkpoint (TRUNCATE) + VACUUM with the four-phase contract
+    /// declared in `crate::maintenance`: quiescence check, disk-capacity
+    /// preflight, per-phase progress, phase-boundary cancellation, and
+    /// post-operation introspection.
+    ///
+    /// Runs while holding the inner connection Mutex: no row/blob operation
+    /// can interleave, so the quiescence check (`is_autocommit`) is
+    /// authoritative for this process. Mirrors the Swift
+    /// `SQLiteBackend.performMaintenance`.
+    fn perform_maintenance(
+        &self,
+        progress: Option<&(dyn Fn(crate::maintenance::MaintenanceProgress) + Send + Sync)>,
+        should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<crate::maintenance::MaintenanceReport, crate::maintenance::MaintenanceError>
+    {
+        use crate::maintenance::{
+            MaintenanceError as ME, MaintenancePhase as MP, MaintenanceProgress,
+            MaintenanceReport,
+        };
+        let started = std::time::Instant::now();
+        let total_phases = 4usize;
+        let enter = |phase: MP, completed: usize| -> Result<(), ME> {
+            if let Some(cancel) = should_cancel {
+                if cancel() {
+                    return Err(ME::Cancelled { at_phase: phase });
+                }
+            }
+            if let Some(report) = progress {
+                report(MaintenanceProgress {
+                    phase,
+                    completed_phases: completed,
+                    total_phases,
+                });
+            }
+            Ok(())
+        };
+        let path = match &self.config.backend {
+            BackendConfiguration::Sqlite { path, .. } => path.clone(),
+            _ => String::new(),
+        };
+        let wal_path = format!("{path}-wal");
+
+        let guard = self.inner.lock().unwrap();
+        let pragma = |name: &str| -> Result<i64, ME> {
+            guard
+                .conn
+                .query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+                .map_err(|e| ME::BackendFailure {
+                    reason: format!("pragma {name}: {e}"),
+                })
+        };
+
+        // Phase 1 — preflight: quiescence, baselines, disk capacity.
+        enter(MP::Preflight, 0)?;
+        if !guard.conn.is_autocommit() {
+            return Err(ME::NotQuiescent {
+                reason: "a transaction is open on the estate connection".to_string(),
+            });
+        }
+        let page_size = pragma("page_size")?;
+        let page_count_before = pragma("page_count")?;
+        let freelist_before = pragma("freelist_count")?;
+        let file_before = maintenance_file_bytes(&path);
+        let wal_before = maintenance_file_bytes(&wal_path);
+        // VACUUM rewrites the live pages into a temporary database before
+        // swapping it in, so the volume needs at least the live-content size
+        // free. Best-effort: when the volume capacity cannot be read (None),
+        // VACUUM proceeds and its own failure is still surfaced.
+        let required_bytes = (page_count_before - freelist_before) * page_size;
+        if let Some(available) = maintenance_volume_available_bytes(&path) {
+            if available < required_bytes {
+                return Err(ME::InsufficientDiskCapacity {
+                    required_bytes,
+                    available_bytes: available,
+                });
+            }
+        }
+
+        // Phase 2 — WAL checkpoint. TRUNCATE flushes every frame into the
+        // main database file and truncates the WAL to zero bytes, so the
+        // subsequent VACUUM operates on the complete committed state and the
+        // WAL's disk footprint is released along with the freelist pages.
+        enter(MP::WalCheckpoint, 1)?;
+        guard
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(|e| ME::BackendFailure {
+                reason: format!("wal_checkpoint failed: {e}"),
+            })?;
+
+        // Phase 3 — VACUUM. Atomic at the SQLite level; never interrupted
+        // mid-flight (cancellation was honoured at the phase boundary).
+        enter(MP::Vacuum, 2)?;
+        guard
+            .conn
+            .execute_batch("VACUUM")
+            .map_err(|e| ME::BackendFailure {
+                reason: format!("VACUUM failed: {e}"),
+            })?;
+
+        // Phase 4 — post-operation introspection. VACUUM itself commits
+        // through the WAL in WAL mode, so a second TRUNCATE checkpoint runs
+        // first — without it the rewritten pages would sit in a fresh WAL
+        // file and the filesystem would not see the reclaim.
+        enter(MP::Introspection, 3)?;
+        guard
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(|e| ME::BackendFailure {
+                reason: format!("post-VACUUM wal_checkpoint failed: {e}"),
+            })?;
+        let page_count_after = pragma("page_count")?;
+        let freelist_after = pragma("freelist_count")?;
+        let file_after = maintenance_file_bytes(&path);
+        let wal_after = maintenance_file_bytes(&wal_path);
+        let reclaimed = ((file_before + wal_before) - (file_after + wal_after)).max(0);
+        Ok(MaintenanceReport {
+            backend: "sqlite".to_string(),
+            performed: true,
+            note: None,
+            page_size_bytes: page_size,
+            page_count_before,
+            page_count_after,
+            freelist_pages_before: freelist_before,
+            freelist_pages_after: freelist_after,
+            file_size_bytes_before: file_before,
+            file_size_bytes_after: file_after,
+            wal_bytes_before: wal_before,
+            wal_bytes_after: wal_after,
+            reclaimed_bytes: reclaimed,
+            duration_seconds: started.elapsed().as_secs_f64(),
+        })
+    }
+}
+
+/// Size on disk of `path`, or 0 when absent / in-memory.
+fn maintenance_file_bytes(path: &str) -> i64 {
+    if path.is_empty() || path.starts_with(":memory:") {
+        return 0;
+    }
+    std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0)
+}
+
+/// Available bytes on the volume holding `path` (statvfs on the parent
+/// directory). None when the capacity cannot be determined — the caller
+/// treats that as "skip the preflight", matching the Swift best-effort
+/// contract.
+#[cfg(unix)]
+fn maintenance_volume_available_bytes(path: &str) -> Option<i64> {
+    use std::os::unix::ffi::OsStrExt;
+    if path.is_empty() || path.starts_with(":memory:") {
+        return None;
+    }
+    let parent = std::path::Path::new(path).parent()?;
+    let dir = if parent.as_os_str().is_empty() {
+        std::ffi::CString::new(".").ok()?
+    } else {
+        std::ffi::CString::new(parent.as_os_str().as_bytes()).ok()?
+    };
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(dir.as_ptr(), &mut stat) };
+    if rc != 0 {
+        return None;
+    }
+    Some((stat.f_bavail as i64).saturating_mul(stat.f_frsize as i64))
+}
+
+#[cfg(not(unix))]
+fn maintenance_volume_available_bytes(_path: &str) -> Option<i64> {
+    None
 }
 
 impl StorageTransaction for SqliteStorage {
@@ -1352,8 +1706,123 @@ fn fetch_matching_keys(
     .unwrap_or_default()
 }
 
-/// Resolve the row's primary key: a single-column UUID primary key reads
-/// the UUID from the row; anything else gets a fresh v4.
+/// Fetch the full column values for the first row matching `conflict_columns`
+/// from `values`. Returns `None` if no matching row exists or on error.
+///
+/// Used by `upsert` to compute `changed_columns` before the INSERT ON CONFLICT.
+/// Cost: one O(1) SELECT on the conflict-column index. The Mutex serializes
+/// writes so there is no interleaving between this read and the upsert.
+fn fetch_row_by_conflict_columns(
+    conn: &Connection,
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    values: &BTreeMap<String, TypedValue>,
+    conflict_columns: &[String],
+) -> Option<BTreeMap<String, TypedValue>> {
+    if conflict_columns.is_empty() {
+        return None;
+    }
+    let pairs: Vec<(&String, &TypedValue)> = conflict_columns
+        .iter()
+        .filter_map(|col| values.get(col).map(|v| (col, v)))
+        .collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    let where_sql = pairs
+        .iter()
+        .map(|(col, _)| format!("\"{col}\" = ?"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let sql = format!("SELECT * FROM \"{table}\" WHERE {where_sql} LIMIT 1");
+    let binds: Vec<SqlValue> = pairs.iter().map(|(_, v)| to_sql(v)).collect();
+    let mut stmt = conn.prepare_cached(&sql).ok()?;
+    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows = stmt.query(params_from_iter(binds)).ok()?;
+    let row = rows.next().ok()??;
+    let mut result: BTreeMap<String, TypedValue> = BTreeMap::new();
+    for (i, name) in col_names.iter().enumerate() {
+        let vref = row.get_ref(i).ok()?;
+        let kit = table_column_type(schema, table, name);
+        if let Ok(v) = read_value(vref, kit, table, name) {
+            result.insert(name.clone(), v);
+        }
+    }
+    Some(result)
+}
+
+/// Fetch full column values for every row matching `predicate`.
+/// Returns a map of `RowKey → BTreeMap<String, TypedValue>`.
+///
+/// Used by `update` to compute `changed_columns` (diff between pre-update
+/// row and SET values — CVK-WB4). Cost: one `SELECT *` before the `UPDATE`.
+/// The Mutex serializes writes so there is no interleaving. On any error
+/// the function returns an empty map; `update` then falls back to `changed_columns: None`.
+fn fetch_matching_rows_with_values(
+    conn: &Connection,
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    predicate: &StoragePredicate,
+) -> std::collections::HashMap<RowKey, BTreeMap<String, TypedValue>> {
+    let pk_col = schema
+        .and_then(|s| s.tables.iter().find(|t| t.name == table))
+        .and_then(|t| t.primary_key.first().cloned())
+        .unwrap_or_else(|| "row_id".to_string());
+    let mut binds: Vec<SqlValue> = Vec::new();
+    let where_sql = match compile_predicate(predicate, &mut binds) {
+        Ok(s) => s,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let sql = format!("SELECT * FROM \"{table}\" WHERE {where_sql}");
+    let mut stmt = match conn.prepare_cached(&sql) {
+        Ok(s) => s,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows_q = match stmt.query(params_from_iter(binds)) {
+        Ok(r) => r,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let mut result = std::collections::HashMap::new();
+    while let Ok(Some(row)) = rows_q.next() {
+        let mut row_map: BTreeMap<String, TypedValue> = BTreeMap::new();
+        let mut row_key: Option<RowKey> = None;
+        for (i, name) in col_names.iter().enumerate() {
+            let vref = match row.get_ref(i) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let kit = table_column_type(schema, table, name);
+            if let Ok(v) = read_value(vref, kit, table, name) {
+                if name == &pk_col {
+                    if let TypedValue::Uuid(u) = &v {
+                        row_key = Some(*u);
+                    }
+                }
+                row_map.insert(name.clone(), v);
+            }
+        }
+        if let Some(k) = row_key {
+            result.insert(k, row_map);
+        }
+    }
+    result
+}
+
+/// Derive the outbound `RowKey` for a just-written row from its column
+/// values, using the schema-declared primary key for `table`.
+///
+/// Single-column PK only (composite/multi-column PKs fall through to the
+/// random-mint default below — unchanged, out of gap-5's scope — Kong's
+/// guard). For a `.uuid`-typed PK, the value itself IS the key (unchanged
+/// fast path). For a `.text`-typed PK: parses as a UUID string when
+/// possible (unchanged from before gap 5); otherwise, gap 5: derive the key
+/// DETERMINISTICALLY from the PK's content via
+/// `row_key_derivation::deterministic_row_key` instead of falling through
+/// to a fresh random UUID. Before this fix, a genuinely non-UUID-shaped
+/// `.text` PK value (LocusKit's documented, not-yet-exercised deterministic-
+/// id capability) still forked row identity between spokes even on the
+/// SQLite backend — see `row_key_derivation.rs` for the full rationale.
 fn extract_row_key(
     schema: Option<&SchemaDeclaration>,
     table: &str,
@@ -1361,8 +1830,13 @@ fn extract_row_key(
 ) -> RowKey {
     if let Some(decl) = schema.and_then(|s| s.tables.iter().find(|t| t.name == table)) {
         if decl.primary_key.len() == 1 {
-            if let Some(TypedValue::Uuid(u)) = values.get(&decl.primary_key[0]) {
-                return *u;
+            match values.get(&decl.primary_key[0]) {
+                Some(TypedValue::Uuid(u)) => return *u,
+                // deterministic_row_key parses a UUID-shaped string directly
+                // (unchanged behavior from before gap 5) and only falls to
+                // the SHA-256 derivation for a genuinely non-UUID string.
+                Some(TypedValue::Text(s)) => return crate::row_key_derivation::deterministic_row_key(s),
+                _ => {}
             }
         }
     }
@@ -1434,12 +1908,16 @@ impl RowStore for SqliteRowStore {
             .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
+        // changedColumns for insert = all written column names (CVK-WB4).
+        let changed_cols: std::collections::HashSet<String> = values.keys().cloned().collect();
         self.observers.emit(&TableChange {
             table: table.to_string(),
             event: StorageEvent::Insert,
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
+            changed_columns: Some(changed_cols),
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1495,6 +1973,11 @@ impl RowStore for SqliteRowStore {
                 sql.push_str(&format!(" DO UPDATE SET {}", updates.join(", ")));
             }
         }
+        // Pre-read existing row for changedColumns diff BEFORE the upsert (CVK-WB4).
+        // One O(1) SELECT on the conflict-column index. The Mutex serializes writes
+        // so there is no interleaving between this read and the INSERT ON CONFLICT.
+        let existing_row = fetch_row_by_conflict_columns(
+            &guard.conn, guard.schema.as_ref(), table, &values, conflict_columns);
         let binds: Vec<SqlValue> = keys.iter().map(|k| to_sql(&values[*k])).collect();
         // prepare_cached: the SQL text for a given (table, column-set) shape is
         // identical across a bulk loop, so the statement parses ONCE and replays
@@ -1508,12 +1991,21 @@ impl RowStore for SqliteRowStore {
             .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
+        let changed_cols: std::collections::HashSet<String> = if let Some(old) = &existing_row {
+            // Upsert-as-update: stamp only columns that differ from the stored row.
+            values.keys().filter(|col| old.get(*col) != values.get(*col)).cloned().collect()
+        } else {
+            // Upsert-as-insert: all written columns are new.
+            values.keys().cloned().collect()
+        };
         self.observers.emit(&TableChange {
             table: table.to_string(),
             event: StorageEvent::Update,
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
+            changed_columns: Some(changed_cols),
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1539,11 +2031,11 @@ impl RowStore for SqliteRowStore {
             validate_sql_identifier(k)?;
         }
         let guard = self.inner.lock().unwrap();
-        // Pre-query row keys before mutating. The `values` map carries only
-        // the SET columns (not the primary key). The Mutex serializes all
-        // operations so no interleaving is possible between this SELECT and
-        // the UPDATE.
-        let matched_keys = fetch_matching_keys(&guard.conn, guard.schema.as_ref(), table, predicate);
+        // Pre-read full row values BEFORE mutating for changedColumns diff (CVK-WB4).
+        // One SELECT * per update; the Mutex serializes all operations so no
+        // interleaving is possible between this read and the UPDATE.
+        // On error (empty map) each notification falls back to changed_columns: None.
+        let pre_rows = fetch_matching_rows_with_values(&guard.conn, guard.schema.as_ref(), table, predicate);
         let keys: Vec<&String> = values.keys().collect();
         let set_clause = keys
             .iter()
@@ -1561,13 +2053,21 @@ impl RowStore for SqliteRowStore {
             .map_err(|e| map_sql_err(e, table))?
             .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
-        for key in matched_keys {
+        for (key, old_row) in &pre_rows {
+            // Compute changed columns: those whose stored value differed from the SET values.
+            let changed_cols: std::collections::HashSet<String> = values
+                .keys()
+                .filter(|col| old_row.get(*col) != values.get(*col))
+                .cloned()
+                .collect();
             self.observers.emit(&TableChange {
                 table: table.to_string(),
                 event: StorageEvent::Update,
-                row_key: Some(key),
+                row_key: Some(*key),
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
+                changed_columns: Some(changed_cols),
             });
         }
         Ok(changed)
@@ -1601,6 +2101,9 @@ impl RowStore for SqliteRowStore {
                 row_key: Some(key),
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
+                // Delete carries no column-level granularity; nil = unknown/all.
+                changed_columns: None,
             });
         }
         Ok(changed)
@@ -2213,7 +2716,7 @@ fn audit_binds(e: &AuditEvent) -> Vec<SqlValue> {
     ]
 }
 
-const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adjective","before_operational","before_provenance","after_adjective","after_operational","after_provenance","before_lattice_anchor","after_lattice_anchor","before_lattice_qid","after_lattice_qid","actor","reason""#;
+const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adj","before_op","before_pv","after_adj","after_op","after_pv","before_udc","after_udc","before_qid","after_qid","actor","reason""#;
 
 /// Decode one audit row from rusqlite into an AuditEvent.
 ///
@@ -3017,6 +3520,93 @@ mod hlc_roundtrip_tests {
             }
             other => panic!("expected TypedValue::Hlc, got {:?}", other),
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// extract_row_key schema-PK tests (Gap 1 parity check — the Swift
+// `SQLiteBackend.extractRowKey` sibling was hardcoded to a literal
+// "row_id" column and fell back to a random UUID for any table whose
+// primary key was declared under a different name. `extract_row_key`
+// here (src/sqlite.rs, above) already reads `decl.primary_key[0]` from
+// the schema declaration rather than a hardcoded literal, so it never
+// had the defect — these tests lock that correct behavior in as a
+// regression guard, matching the Swift-side coverage added for the
+// same gap (SQLiteObserverTests.swift:
+// insertReturnsRealSchemaPKNotRandomUUID /
+// insertNotificationCarriesRealSchemaPK /
+// upsertReturnsRealSchemaPKNotRandomUUID).
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod extract_row_key_schema_pk_tests {
+    use super::*;
+    use crate::{
+        BackendConfiguration, ColumnDeclaration, EstateConfiguration, SchemaDeclaration,
+        Storage, TableDeclaration, TypedValue,
+    };
+    use uuid::Uuid;
+
+    /// Schema whose primary key column is named "id", not "row_id" — the
+    /// exact shape that exposed the Swift-side bug.
+    fn make_storage_with_non_row_id_pk() -> SqliteStorage {
+        let path = std::env::temp_dir()
+            .join(format!("extract_row_key_pk_{}.sqlite", Uuid::new_v4()));
+        let config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = SqliteStorage::new(config).expect("open sqlite");
+        let schema = SchemaDeclaration::new(
+            "extract-row-key-test",
+            1,
+            vec![TableDeclaration::new(
+                "docs",
+                vec![ColumnDeclaration::uuid("id"), ColumnDeclaration::text("label")],
+                vec!["id".to_string()],
+            )],
+        );
+        storage.open(&schema).expect("open schema");
+        storage
+    }
+
+    #[test]
+    fn insert_returns_real_schema_pk_not_random_uuid() {
+        let storage = make_storage_with_non_row_id_pk();
+        let rs = Storage::row_store(&storage);
+
+        let real_id = Uuid::new_v4();
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("id".into(), TypedValue::Uuid(real_id));
+        values.insert("label".into(), TypedValue::Text("a".into()));
+
+        let handle = rs.insert("docs", values).expect("insert");
+        assert_eq!(
+            handle.key, real_id,
+            "insert must return the schema-declared PK value, not a random UUID"
+        );
+    }
+
+    #[test]
+    fn upsert_returns_real_schema_pk_not_random_uuid() {
+        let storage = make_storage_with_non_row_id_pk();
+        let rs = Storage::row_store(&storage);
+
+        let real_id = Uuid::new_v4();
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("id".into(), TypedValue::Uuid(real_id));
+        values.insert("label".into(), TypedValue::Text("b".into()));
+
+        let handle = rs
+            .upsert("docs", values, &["id".to_string()])
+            .expect("upsert");
+        assert_eq!(
+            handle.key, real_id,
+            "upsert must return the schema-declared PK value, not a random UUID"
+        );
     }
 }
 

@@ -1,6 +1,6 @@
 // SnapshotRegistryTests.swift
 //
-// Tests for snapshot registry + attestations (ADR-017 §15).
+// Tests for snapshot registry + attestations.
 
 import Testing
 import Foundation

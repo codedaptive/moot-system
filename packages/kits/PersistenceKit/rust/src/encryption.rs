@@ -10,7 +10,7 @@
 //!
 //! `AesGcmAeadProvider` is the default concrete provider, backed by
 //! the `aes-gcm` RustCrypto crate (the first approved external crypto
-//! crate; see `DECISION_RUST_AEAD_CRATE_2026-06-05.md` for the C-1
+//! crate; see `the Rust AES-GCM seam` for the C-1
 //! per-crate exception).
 //!
 //! # Ciphertext layout
@@ -453,6 +453,27 @@ pub(crate) fn resolve_install_encryption(
     let key_path = parent.join(INSTALL_KEY_FILE);
     match std::fs::read(&key_path) {
         Ok(bytes) if bytes.len() == INSTALL_KEY_LEN => {
+            // A present key beside a PLAINTEXT estate file is a mismatched
+            // state: an interrupted migration that minted the key before the
+            // swap, or a plaintext estate file copied in beside an existing
+            // key. `PRAGMA key` on a plaintext file fails at first read
+            // looking like corruption — name the real state and the repair
+            // instead. Fail CLOSED: never fall back to a plaintext open,
+            // because a plaintext file swapped in beside a valid key must
+            // not silently serve unencrypted (that is the downgrade this
+            // whole seam exists to prevent). Absent files pass through: a
+            // new estate is created encrypted under this key.
+            if crate::estate_migration::detect_estate_file_state(Path::new(db_path))
+                == crate::estate_migration::EstateFileState::Plaintext
+            {
+                return Err(StorageError::BackendError {
+                    underlying: format!(
+                        "estate at {db_path} is a PLAINTEXT database but an install key \
+                         ({key_path:?}) is present; refusing to open it as encrypted. \
+                         Run `mootx01 upgrade` to encrypt the estate."
+                    ),
+                });
+            }
             Ok(Some(EstateEncryptionConfig::full_database_with_key(bytes)))
         }
         Ok(bytes) => Err(StorageError::BackendError {
@@ -512,7 +533,7 @@ pub trait AeadProvider: Send + Sync {
 /// C-1 per-crate exception: `aes-gcm` is the first approved external
 /// crypto crate. Rationale: at-rest AEAD, not conformance-gated (random
 /// nonce makes per-call output non-deterministic); hand-rolling an AEAD
-/// is never acceptable. See `DECISION_RUST_AEAD_CRATE_2026-06-05.md`.
+/// is never acceptable. See `the Rust AES-GCM seam`.
 pub struct AesGcmAeadProvider;
 
 /// Byte counts fixed by AES-GCM-256. These match the Swift layout.

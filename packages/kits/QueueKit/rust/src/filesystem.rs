@@ -540,7 +540,7 @@ impl QueueBackend for FilesystemBackend {
         }
     }
 
-    // ── Stream-scoped drain (ADR-021 Decision 7 / T1) ──────────────────────
+    // ── Stream-scoped drain ──────────────────────
 
     /// Claim and return only the pending jobs that belong to `stream`.
     ///

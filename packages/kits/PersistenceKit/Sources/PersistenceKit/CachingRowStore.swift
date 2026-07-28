@@ -5,7 +5,7 @@
 //
 // Cache key: (table, UUID key, AsOfCoordinate). A present read and an
 // as-of snapshot read of the same row are distinct cache entries per
-// ADR-017 §18. Snapshot reads (.asOf(hlc)) against pinned immutable
+// node-tree integrity. Snapshot reads (.asOf(hlc)) against pinned immutable
 // views are safely cacheable because the GC pin (NT-P3) prevents
 // vacuum of pinned rows. Present reads remain invalidation-driven.
 //
@@ -141,6 +141,47 @@ public final class CachingRowStore: RowStore, Sendable {
         return count
     }
 
+    // MARK: — Sync-tagged write paths (CVK-ICLOUD P1-M1, I-10)
+    // Delegate to the backing store's sync variants so the .syncApply origin
+    // propagates through the chain without being silently dropped to .local.
+    // Cache invalidation is identical to the ordinary write paths.
+
+    public func insertSync(table: String, values: [String: TypedValue]) async throws -> RowHandle {
+        let handle = try await backing.insertSync(table: table, values: values)
+        if config.enabled {
+            await invalidateParentChain(table: table, key: handle.key)
+        }
+        return handle
+    }
+
+    public func upsertSync(
+        table: String,
+        values: [String: TypedValue],
+        conflictColumns: [String]
+    ) async throws -> RowHandle {
+        let handle = try await backing.upsertSync(
+            table: table, values: values, conflictColumns: conflictColumns
+        )
+        if config.enabled {
+            await cache.evictPresent(RowHandle(table: table, key: handle.key))
+            await invalidateParentChain(table: table, key: handle.key)
+        }
+        return handle
+    }
+
+    public func deleteSync(table: String, where predicate: StoragePredicate) async throws -> Int {
+        let count = try await backing.deleteSync(table: table, where: predicate)
+        if config.enabled, count > 0 {
+            if let key = extractKey(from: predicate) {
+                await cache.evictPresent(RowHandle(table: table, key: key))
+                await invalidateParentChain(table: table, key: key)
+            } else {
+                await cache.evictAllPresent(table: table)
+            }
+        }
+        return count
+    }
+
     public func query(
         table: String,
         where predicate: StoragePredicate?,
@@ -155,7 +196,7 @@ public final class CachingRowStore: RowStore, Sendable {
         )
     }
 
-    // MARK: — Temporal query (ADR-017 §18)
+    // MARK: — Temporal query
 
     /// Temporal query with cache isolation by AsOfCoordinate. A present
     /// read and an as-of snapshot read of the same row are distinct cache
