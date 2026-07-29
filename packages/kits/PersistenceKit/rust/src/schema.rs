@@ -176,14 +176,8 @@ impl ColumnDeclaration {
     pub fn uuid(name: impl Into<String>) -> Self {
         Self::new(name, ColumnType::Uuid)
     }
-    /// Bitmap column with a `DEFAULT 0` — matching the Swift
-    /// `ColumnDeclaration.bitmap(_:nullable:default:)` factory, which mints a
-    /// `.bitmap(0)` default unless overridden. The ports must emit identical
-    /// DDL for equivalent declarations (composite layout-signature parity,
-    /// GLK shared-content 1.1 P0); before this default the Rust port created
-    /// bitmap columns WITHOUT the default Swift estates carry.
     pub fn bitmap(name: impl Into<String>) -> Self {
-        Self::new(name, ColumnType::Bitmap).with_default(TypedValue::Bitmap(0))
+        Self::new(name, ColumnType::Bitmap)
     }
     pub fn text(name: impl Into<String>) -> Self {
         Self::new(name, ColumnType::Text)

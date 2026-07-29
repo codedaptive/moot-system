@@ -12,7 +12,7 @@ name = "persistence_kit"
 path = "src/lib.rs"
 
 [dependencies]
-substrate-types = { package = "substrate-types", git = "https://github.com/codedaptive/moot-core", tag = "v1.0.35" }
+substrate-types = { package = "substrate-types", git = "https://github.com/codedaptive/moot-core", tag = "v1.0.36" }
 uuid = { version = "1", features = ["v4"] }
 # SQLite backend: SQLCipher compiled from source (bundled, no system dep),
 # with vendored OpenSSL libcrypto for the page cipher. Provides whole-database
@@ -26,7 +26,7 @@ rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"]
 # disabled (the default). Off-path cost: one AtomicBool load + branch.
 # Layering: intellectus-lib has no repo deps; this is downstream→upstream.
 # Repository-owned dependencies use local package paths.
-intellectus-lib = { package = "intellectus-lib", git = "https://github.com/codedaptive/moot-core", tag = "v1.0.35" }
+intellectus-lib = { package = "intellectus-lib", git = "https://github.com/codedaptive/moot-core", tag = "v1.0.36" }
 # ISO-8601 timestamp formatting for TEXT date columns (schema invariant).
 chrono = "0.4"
 # PostgreSQL backend: synchronous client (matches the sync Storage trait).
@@ -54,7 +54,3 @@ postgres-native-tls = "0.5"
 # in build_tls_connector() in postgres.rs. Version constraint matches what
 # postgres-native-tls 0.5 pulls in (0.2.x).
 native-tls = "0.2"
-# Disk-capacity preflight for the maintenance VACUUM (statvfs on the estate
-# directory; shared-content 1.1 P5). Unix-only; non-unix builds skip the
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"

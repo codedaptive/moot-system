@@ -887,7 +887,6 @@ dependencies = [
  "aes-gcm",
  "chrono",
  "intellectus-lib",
- "libc",
  "native-tls",
  "postgres",
  "postgres-native-tls",

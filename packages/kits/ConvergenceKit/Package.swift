@@ -85,13 +85,7 @@ let package = Package(
         // Test targets.
         .testTarget(
             name: "ConvergenceKitTests",
-            dependencies: [
-                "ConvergenceKit",
-                "SubstrateTypes",
-                // SkewQueueTests uses InMemoryStorage to exercise PendingSkewQueue
-                // and SkewReplay in isolation (CVK-ICLOUD P3-M4).
-                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
-            ],
+            dependencies: ["ConvergenceKit", "SubstrateTypes"],
             path: "Tests/ConvergenceKitTests"
         ),
         .testTarget(
@@ -119,10 +113,6 @@ let package = Package(
             dependencies: [
                 "ConvergenceKit",
                 "ConvergenceKitFederation",
-                // P5-M1b: needed to call CKSideSchema.ensure in retention tests that
-                // verify OutboxStore.deleteMatchingParked works when the CK outbox table
-                // exists on a storage instance also used by the Federation backend.
-                "ConvergenceKitCloudKit",
                 "ConvergenceKitConformance",
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
             ],

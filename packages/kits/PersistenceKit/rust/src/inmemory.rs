@@ -14,7 +14,7 @@ use crate::audit_log::{AuditEvent, AuditLog};
 use crate::blob_store::BlobStore;
 use crate::error::{StorageError, StorageResult};
 use crate::generated_column::GeneratedColumn;
-use crate::observer::{BlobChange, BlobEvent, BlobObserverHub, ChangeOrigin, ObserverHub, StorageEvent, StorageObserver, TableChange};
+use crate::observer::{BlobChange, BlobEvent, BlobObserverHub, ObserverHub, StorageEvent, StorageObserver, TableChange};
 use crate::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use crate::caching_row_store::CachingRowStore;
 use crate::row_store::RowStore;
@@ -81,11 +81,6 @@ pub struct InMemoryStorage {
     /// blob changes do not filter by table name — every subscriber gets every
     /// blob event (same pattern as Swift's `ObserverRegistry.notifyBlob`).
     blob_hub: Arc<BlobObserverHub>,
-    /// Single shared dataset store for this storage's lifetime. A per-call
-    /// fresh instance would hand each caller an independent empty store —
-    /// two `dataset_store()` calls must observe the same tables (parity
-    /// with Swift's stored `let datasetStore`).
-    dataset_store: Arc<crate::dataset_store::InMemoryDatasetStore>,
     /// Monotone counter of transaction rollbacks. Stored separately from
     /// `state` because `state` is snapshot/restored on rollback — putting the
     /// counter there would reset it on every rollback, losing the history.
@@ -103,7 +98,6 @@ impl InMemoryStorage {
             state: Arc::new(Mutex::new(State::default())),
             hub: Arc::new(ObserverHub::new()),
             blob_hub: Arc::new(BlobObserverHub::new()),
-            dataset_store: Arc::new(crate::dataset_store::InMemoryDatasetStore::new()),
             rollback_count: Arc::new(Mutex::new(0)),
         }
     }
@@ -118,30 +112,6 @@ impl InMemoryStorage {
 }
 
 impl Storage for InMemoryStorage {
-    /// The in-memory backend has no page model and no on-disk footprint:
-    /// nothing is ever reclaimable (explicit per-backend contract, mirrors
-    /// the Swift `InMemoryStorage: StorageMaintenance` conformance).
-    fn estimated_reclaimable_bytes(
-        &self,
-    ) -> Result<i64, crate::maintenance::MaintenanceError> {
-        Ok(0)
-    }
-
-    /// Explicit no-op (per the maintenance backend table). The report says
-    /// `performed: false` so callers can distinguish "ran and freed
-    /// nothing" from "nothing to run".
-    fn perform_maintenance(
-        &self,
-        _progress: Option<&(dyn Fn(crate::maintenance::MaintenanceProgress) + Send + Sync)>,
-        _should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
-    ) -> Result<crate::maintenance::MaintenanceReport, crate::maintenance::MaintenanceError>
-    {
-        Ok(crate::maintenance::MaintenanceReport::no_op(
-            "inmemory",
-            "in-memory backend holds no pages; nothing to reclaim",
-        ))
-    }
-
     fn configuration(&self) -> &EstateConfiguration {
         &self.configuration
     }
@@ -182,17 +152,6 @@ impl Storage for InMemoryStorage {
             hub: self.hub.clone(),
             blob_hub: self.blob_hub.clone(),
         })
-    }
-
-    /// Dataset store override: returns the storage's single shared
-    /// `InMemoryDatasetStore` instance — every call sees the same dataset
-    /// state, mirroring the Swift leg's stored `let datasetStore` property.
-    /// Note: InMemory dataset state is separate from `InMemoryStorage.state`
-    /// (it does not participate in `transaction()` rollbacks). This is
-    /// acceptable for a test double — individual operation correctness is
-    /// what MX-TAB-1 tests verify.
-    fn dataset_store(&self) -> StorageResult<Arc<dyn crate::dataset_store::DatasetStore>> {
-        Ok(self.dataset_store.clone())
     }
 
     fn open(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
@@ -440,52 +399,24 @@ struct InMemoryRowStore {
 }
 
 impl InMemoryRowStore {
-    /// Resolve the internal `RowKey` for a row about to be written.
-    ///
-    /// Single-column PK only (composite/multi-column PKs fall through to
-    /// the random-mint default below — unchanged, out of gap-5's scope).
-    /// For a `.uuid`-typed PK, the value itself IS the key (unchanged fast
-    /// path). For a `.text`-typed PK, gap 5: derive the key
-    /// DETERMINISTICALLY from the PK's content via
-    /// `row_key_derivation::deterministic_row_key` instead of minting a
-    /// fresh random UUID. Before this fix, two storage instances (e.g. two
-    /// federation spokes) writing the same logical row (same `.text` PK
-    /// value) resolved two unrelated random `RowKey`s, so ConvergenceKit's
-    /// HLC-ordering gates — keyed by `RowKey` — compared against mismatched
-    /// side-table entries and ordering silently degraded to pull-order
-    /// instead of HLC-order. See `row_key_derivation.rs` for the full
-    /// rationale and the sibling relationship to `deterministic_uuid`
-    /// (LocusKit's `merkle_rollup.rs`).
     fn resolve_key(table: &Table, values: &BTreeMap<String, TypedValue>) -> RowKey {
         if table.declaration.primary_key.len() == 1 {
             let pk = &table.declaration.primary_key[0];
-            match values.get(pk) {
-                Some(TypedValue::Uuid(u)) => return *u,
-                Some(TypedValue::Text(s)) => return crate::row_key_derivation::deterministic_row_key(s),
-                _ => {}
+            if let Some(TypedValue::Uuid(u)) = values.get(pk) {
+                return *u;
             }
         }
         uuid::Uuid::new_v4()
     }
 }
 
-impl InMemoryRowStore {
-    // ----------------------------------------------------------------
-    // Private helpers — write with explicit ChangeOrigin
-    //
-    // `insert`, `upsert`, and `delete` delegate here with Local;
-    // the `_sync` trait overrides delegate here with SyncApply so that
-    // ConvergenceKit's outbox observer can suppress inbound-apply writes
-    // via `change.origin == ChangeOrigin::SyncApply` (I-10, WC2).
-    // ----------------------------------------------------------------
-
-    fn insert_impl(
+impl RowStore for InMemoryRowStore {
+    fn insert(
         &self,
         table: &str,
         values: BTreeMap<String, TypedValue>,
-        origin: ChangeOrigin,
     ) -> StorageResult<RowHandle> {
-        let (key, stored, changed, in_txn) = {
+        let (key, stored, in_txn) = {
             let mut state = self.state.lock().unwrap();
             let t = state
                 .tables
@@ -504,8 +435,6 @@ impl InMemoryRowStore {
             let mut stored = values;
             materialize_generated(&generated, &mut stored);
             t.rows.insert(key, stored.clone());
-            // changedColumns for insert = all stored column names (CVK-WB4).
-            let changed: std::collections::HashSet<String> = stored.keys().cloned().collect();
             // Buffer notification if in a transaction (SECFIX-WS2-PK F2).
             let in_txn = state.in_transaction;
             if in_txn {
@@ -515,11 +444,9 @@ impl InMemoryRowStore {
                     row_key: Some(key),
                     values: Some(stored.clone()),
                     hlc: None,
-                    origin,
-                    changed_columns: Some(changed.clone()),
                 });
             }
-            (key, stored, changed, in_txn)
+            (key, stored, in_txn)
         };
         if !in_txn {
             self.hub.emit(TableChange {
@@ -528,21 +455,18 @@ impl InMemoryRowStore {
                 row_key: Some(key),
                 values: Some(stored),
                 hlc: None,
-                origin,
-                changed_columns: Some(changed),
             });
         }
         Ok(RowHandle::new(table, key))
     }
 
-    fn upsert_impl(
+    fn upsert(
         &self,
         table: &str,
         values: BTreeMap<String, TypedValue>,
         conflict_columns: &[String],
-        origin: ChangeOrigin,
     ) -> StorageResult<RowHandle> {
-        let (key, event, emitted_values, changed_cols, in_txn) = {
+        let (key, event, emitted_values, in_txn) = {
             let mut state = self.state.lock().unwrap();
             let t = state
                 .tables
@@ -564,30 +488,20 @@ impl InMemoryRowStore {
                 })
                 .map(|(k, _)| *k);
             let generated = t.declaration.generated_columns.clone();
-            let (key, ev, vals, changed) = if let Some(k) = existing_key {
+            let (key, ev, vals) = if let Some(k) = existing_key {
                 let row = t.rows.get_mut(&k).unwrap();
-                // Capture old values before mutation for changedColumns diff (CVK-WB4).
-                let old_row = row.clone();
                 for (col, v) in values.into_iter() {
                     row.insert(col, v);
                 }
                 materialize_generated(&generated, row);
                 let merged = row.clone();
-                // changedColumns = columns whose value differs from the pre-upsert row.
-                let changed: std::collections::HashSet<String> = merged
-                    .keys()
-                    .filter(|col| old_row.get(*col) != merged.get(*col))
-                    .cloned()
-                    .collect();
-                (k, StorageEvent::Update, merged, changed)
+                (k, StorageEvent::Update, merged)
             } else {
                 let key = Self::resolve_key(t, &values);
                 let mut stored = values;
                 materialize_generated(&generated, &mut stored);
                 t.rows.insert(key, stored.clone());
-                // changedColumns for upsert-as-insert = all stored column names.
-                let changed: std::collections::HashSet<String> = stored.keys().cloned().collect();
-                (key, StorageEvent::Insert, stored, changed)
+                (key, StorageEvent::Insert, stored)
             };
             // Buffer notification if in a transaction (SECFIX-WS2-PK F2).
             let in_txn = state.in_transaction;
@@ -598,11 +512,9 @@ impl InMemoryRowStore {
                     row_key: Some(key),
                     values: Some(vals.clone()),
                     hlc: None,
-                    origin,
-                    changed_columns: Some(changed.clone()),
                 });
             }
-            (key, ev, vals, changed, in_txn)
+            (key, ev, vals, in_txn)
         };
         if !in_txn {
             self.hub.emit(TableChange {
@@ -611,19 +523,78 @@ impl InMemoryRowStore {
                 row_key: Some(key),
                 values: Some(emitted_values),
                 hlc: None,
-                origin,
-                changed_columns: Some(changed_cols),
             });
         }
         Ok(RowHandle::new(table, key))
     }
 
-    fn delete_impl(
+    fn update(
         &self,
         table: &str,
+        values: BTreeMap<String, TypedValue>,
         predicate: &StoragePredicate,
-        origin: ChangeOrigin,
     ) -> StorageResult<usize> {
+        let mut notifications: Vec<(RowKey, BTreeMap<String, TypedValue>)> = Vec::new();
+        let (count, in_txn) = {
+            let mut state = self.state.lock().unwrap();
+            let t = state
+                .tables
+                .get_mut(table)
+                .ok_or_else(|| StorageError::InvalidQuery {
+                    detail: format!("update: table {} not found", table),
+                })?;
+            if t.declaration.append_only {
+                return Err(StorageError::AppendOnlyViolation {
+                    table: table.to_string(),
+                });
+            }
+            let generated = t.declaration.generated_columns.clone();
+            let mut count = 0;
+            let matching_keys: Vec<RowKey> = t
+                .rows
+                .iter()
+                .filter(|(_, row)| evaluate_predicate(predicate, row))
+                .map(|(k, _)| *k)
+                .collect();
+            for k in matching_keys {
+                let row = t.rows.get_mut(&k).unwrap();
+                for (col, v) in values.iter() {
+                    row.insert(col.clone(), v.clone());
+                }
+                materialize_generated(&generated, row);
+                notifications.push((k, row.clone()));
+                count += 1;
+            }
+            // Buffer notifications when inside a transaction (SECFIX-WS2-PK F2).
+            let in_txn = state.in_transaction;
+            if in_txn {
+                for (key, row) in &notifications {
+                    state.pending_row_events.push(TableChange {
+                        table: table.to_string(),
+                        event: StorageEvent::Update,
+                        row_key: Some(*key),
+                        values: Some(row.clone()),
+                        hlc: None,
+                    });
+                }
+            }
+            (count, in_txn)
+        };
+        if !in_txn {
+            for (key, row) in notifications {
+                self.hub.emit(TableChange {
+                    table: table.to_string(),
+                    event: StorageEvent::Update,
+                    row_key: Some(key),
+                    values: Some(row),
+                    hlc: None,
+                });
+            }
+        }
+        Ok(count)
+    }
+
+    fn delete(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
         let mut notifications: Vec<(RowKey, BTreeMap<String, TypedValue>)> = Vec::new();
         let (count, in_txn) = {
             let mut state = self.state.lock().unwrap();
@@ -658,9 +629,6 @@ impl InMemoryRowStore {
                         row_key: Some(*key),
                         values: Some(row.clone()),
                         hlc: None,
-                        origin,
-                        // changedColumns for delete = None (CVK-WB4).
-                        changed_columns: None,
                     });
                 }
             }
@@ -674,137 +642,10 @@ impl InMemoryRowStore {
                     row_key: Some(key),
                     values: Some(row),
                     hlc: None,
-                    origin,
-                    // changedColumns for delete = None (CVK-WB4).
-                    changed_columns: None,
                 });
             }
         }
         Ok(count)
-    }
-}
-
-impl RowStore for InMemoryRowStore {
-    fn insert(
-        &self,
-        table: &str,
-        values: BTreeMap<String, TypedValue>,
-    ) -> StorageResult<RowHandle> {
-        self.insert_impl(table, values, ChangeOrigin::Local)
-    }
-
-    fn insert_sync(
-        &self,
-        table: &str,
-        values: BTreeMap<String, TypedValue>,
-    ) -> StorageResult<RowHandle> {
-        self.insert_impl(table, values, ChangeOrigin::SyncApply)
-    }
-
-    fn upsert(
-        &self,
-        table: &str,
-        values: BTreeMap<String, TypedValue>,
-        conflict_columns: &[String],
-    ) -> StorageResult<RowHandle> {
-        self.upsert_impl(table, values, conflict_columns, ChangeOrigin::Local)
-    }
-
-    fn upsert_sync(
-        &self,
-        table: &str,
-        values: BTreeMap<String, TypedValue>,
-        conflict_columns: &[String],
-    ) -> StorageResult<RowHandle> {
-        self.upsert_impl(table, values, conflict_columns, ChangeOrigin::SyncApply)
-    }
-
-    fn update(
-        &self,
-        table: &str,
-        values: BTreeMap<String, TypedValue>,
-        predicate: &StoragePredicate,
-    ) -> StorageResult<usize> {
-        // Notification payload: (key, merged_row, changed_columns) — CVK-WB4.
-        let mut notifications: Vec<(RowKey, BTreeMap<String, TypedValue>, std::collections::HashSet<String>)> = Vec::new();
-        let (count, in_txn) = {
-            let mut state = self.state.lock().unwrap();
-            let t = state
-                .tables
-                .get_mut(table)
-                .ok_or_else(|| StorageError::InvalidQuery {
-                    detail: format!("update: table {} not found", table),
-                })?;
-            if t.declaration.append_only {
-                return Err(StorageError::AppendOnlyViolation {
-                    table: table.to_string(),
-                });
-            }
-            let generated = t.declaration.generated_columns.clone();
-            let mut count = 0;
-            let matching_keys: Vec<RowKey> = t
-                .rows
-                .iter()
-                .filter(|(_, row)| evaluate_predicate(predicate, row))
-                .map(|(k, _)| *k)
-                .collect();
-            for k in matching_keys {
-                let row = t.rows.get_mut(&k).unwrap();
-                // Capture old values before mutation for changedColumns diff (CVK-WB4).
-                // The pre-update row is available here without an extra read.
-                let old_row = row.clone();
-                for (col, v) in values.iter() {
-                    row.insert(col.clone(), v.clone());
-                }
-                materialize_generated(&generated, row);
-                let merged = row.clone();
-                let changed: std::collections::HashSet<String> = merged
-                    .keys()
-                    .filter(|col| old_row.get(*col) != merged.get(*col))
-                    .cloned()
-                    .collect();
-                notifications.push((k, merged, changed));
-                count += 1;
-            }
-            // Buffer notifications when inside a transaction (SECFIX-WS2-PK F2).
-            let in_txn = state.in_transaction;
-            if in_txn {
-                for (key, row, changed) in &notifications {
-                    state.pending_row_events.push(TableChange {
-                        table: table.to_string(),
-                        event: StorageEvent::Update,
-                        row_key: Some(*key),
-                        values: Some(row.clone()),
-                        hlc: None,
-                        origin: ChangeOrigin::Local,
-                        changed_columns: Some(changed.clone()),
-                    });
-                }
-            }
-            (count, in_txn)
-        };
-        if !in_txn {
-            for (key, row, changed) in notifications {
-                self.hub.emit(TableChange {
-                    table: table.to_string(),
-                    event: StorageEvent::Update,
-                    row_key: Some(key),
-                    values: Some(row),
-                    hlc: None,
-                    origin: ChangeOrigin::Local,
-                    changed_columns: Some(changed),
-                });
-            }
-        }
-        Ok(count)
-    }
-
-    fn delete(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
-        self.delete_impl(table, predicate, ChangeOrigin::Local)
-    }
-
-    fn delete_sync(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
-        self.delete_impl(table, predicate, ChangeOrigin::SyncApply)
     }
 
     fn query(

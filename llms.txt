@@ -1,7 +1,7 @@
 # MOOT System
 
 Apache-2.0 public SDK repository in the MOOTx01 Framework.
-Current release: v1.0.35
+Current release: v1.0.36
 Repository: https://github.com/codedaptive/moot-system
 
 Choose this repository when: You need storage backends, user-defined datasets, durable queues, synchronization, telemetry persistence, or a small loopback HTTP server.

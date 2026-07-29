@@ -23,8 +23,6 @@ pub mod blob_store;
 pub mod cache_config;
 pub mod cache_invalidator;
 pub mod caching_row_store;
-pub mod database_inventory;
-pub mod dataset_store;
 pub mod encryption;
 pub mod error;
 pub mod estate_migration;
@@ -34,20 +32,12 @@ pub mod generated_column;
 pub mod hashing_row_store;
 pub mod inmemory;
 pub mod introspection;
-// Canonical schema layout signatures + deterministic table inventories
-// (GLK shared-content 1.1, P0). Accessed via module path or the re-exports
-// below.
-pub mod layout_signature;
-// Physical storage maintenance — WAL checkpoint + page reclamation
-// (GLK shared-content 1.1, P5).
-pub mod maintenance;
 pub mod observer;
 pub mod postgres;
 pub mod postgres_tls;
 pub mod predicate;
 pub mod incremental_replication;
 pub mod replication;
-pub mod row_key_derivation;
 pub mod row_store;
 pub mod schema;
 pub mod snapshot_registry;
@@ -73,15 +63,12 @@ pub use encryption::{
 pub use error::*;
 pub use generated_column::*;
 pub use introspection::{StorageIntrospection, StorageStats};
-pub use layout_signature::{layout_signature_digest, layout_signature_text};
-pub use database_inventory::{capture_inventory, TableInventory};
 pub use telemetry::report_storage_stats;
 pub use observer::*;
 pub use postgres::PostgresStorage;
 pub use predicate::*;
 // Replication types are not re-exported at crate root to avoid namespace collision.
 // Import them as `use persistence_kit::replication::{replicate, flush, hydrate, ...}`.
-pub use row_key_derivation::deterministic_row_key;
 pub use row_store::*;
 pub use schema::*;
 pub use sqlite::SqliteStorage;

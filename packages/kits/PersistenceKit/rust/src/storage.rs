@@ -3,7 +3,6 @@
 use crate::audit_log::AuditLog;
 use crate::blob_store::BlobStore;
 use crate::cache_config::EstateCacheConfig;
-use crate::dataset_store::DatasetStore;
 use crate::encryption::EstateEncryptionConfig;
 use crate::error::{StorageError, StorageResult};
 use crate::observer::StorageObserver;
@@ -315,20 +314,6 @@ pub trait Storage: Send + Sync {
     fn audit_log(&self) -> Arc<dyn AuditLog>;
     fn observer(&self) -> Arc<dyn StorageObserver>;
 
-    /// Dataset store for user-defined tabular data (MX-TAB-1).
-    ///
-    /// Returns `Err(StorageError::FeatureGated { feature: "datasetStore" })` by
-    /// default so existing `Storage` conformers — including Postgres (deferred,
-    /// MX-TAB-2) and any third-party conformers — keep compiling without
-    /// modification. Only `SqliteStorage` and `InMemoryStorage` override this.
-    ///
-    /// the same default-throws protocol-extension pattern.
-    fn dataset_store(&self) -> StorageResult<Arc<dyn DatasetStore>> {
-        Err(StorageError::FeatureGated {
-            feature: "datasetStore".to_string(),
-        })
-    }
-
     /// Open the backend (run migrations up to the declared
     /// schema version).
     fn open(&self, schema: &SchemaDeclaration) -> StorageResult<()>;
@@ -364,40 +349,6 @@ pub trait Storage: Send + Sync {
         isolation: IsolationLevel,
         block: &mut dyn FnMut(&dyn StorageTransaction) -> StorageResult<()>,
     ) -> StorageResult<()>;
-
-    /// Estimate of the filesystem bytes `perform_maintenance` would release
-    /// (shared-content 1.1 P5). SQLite: freelist pages × page size + WAL
-    /// file bytes. Default (and the explicit contract for backends with no
-    /// client-reclaimable pages): 0.
-    ///
-    /// Lives on `Storage` (defaulted) rather than a separate trait because
-    /// `dyn Storage` cannot be capability-probed the way Swift's
-    /// `StorageMaintenance.estimatedReclaimableBytes`.
-    fn estimated_reclaimable_bytes(
-        &self,
-    ) -> Result<i64, crate::maintenance::MaintenanceError> {
-        Ok(0)
-    }
-
-    /// Run the physical maintenance pass (SQLite: WAL checkpoint + VACUUM)
-    /// with the contract declared in `crate::maintenance`: quiescence check,
-    /// disk-capacity preflight, per-phase progress, phase-boundary
-    /// cancellation, and post-operation introspection. The default is the
-    /// explicit "not implemented" no-op report; SQLite overrides with the
-    /// real operation, in-memory and PostgreSQL override with their
-    /// `StorageMaintenance.performMaintenance(progress:shouldCancel:)`.
-    fn perform_maintenance(
-        &self,
-        progress: Option<&(dyn Fn(crate::maintenance::MaintenanceProgress) + Send + Sync)>,
-        should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
-    ) -> Result<crate::maintenance::MaintenanceReport, crate::maintenance::MaintenanceError>
-    {
-        let _ = (progress, should_cancel);
-        Ok(crate::maintenance::MaintenanceReport::no_op(
-            "unsupported",
-            "backend does not implement physical maintenance",
-        ))
-    }
 }
 
 // ---------------------------------------------------------------------------

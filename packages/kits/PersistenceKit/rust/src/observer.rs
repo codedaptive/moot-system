@@ -38,28 +38,6 @@ pub enum StorageEvent {
     Delete,
 }
 
-/// Origin of a `TableChange` — identifies whether the write was a local
-/// user-initiated change or an inbound sync application.
-///
-/// ConvergenceKit's outbound observer (`record_outbound`) discards changes
-/// with `SyncApply` origin to prevent the multi-device echo loop where
-/// `apply_inbound` writes re-enter the outbound queue and are pushed back
-/// to the originating peer (I-10, CVK-ICLOUD P1-M1).
-///
-/// Rust federation uses the same mechanism as Swift: `apply_record` writes via
-/// `upsert_sync`/`insert_sync`/`delete_sync`, which stamp `SyncApply` at emit
-/// time in `InMemoryRowStore`. Observer workers check
-/// `change.origin == SyncApply` — race-free, no TOCTOU window (FAB5-FO, DUR-5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum ChangeOrigin {
-    /// Default: a local, user-initiated write.
-    #[default]
-    Local,
-    /// A write performed during `apply_inbound` — must NOT re-enter the
-    /// outbound queue on the receiving peer.
-    SyncApply,
-}
-
 #[derive(Debug, Clone)]
 pub struct TableChange {
     pub table: String,
@@ -67,21 +45,6 @@ pub struct TableChange {
     pub row_key: Option<RowKey>,
     pub values: Option<BTreeMap<String, TypedValue>>,
     pub hlc: Option<HLC>,
-    /// Origin of this change (local write vs. inbound sync application).
-    /// Defaults to `ChangeOrigin::Local`. Set to `ChangeOrigin::SyncApply`
-    /// for writes from `apply_inbound` so the outbound observer can discard
-    /// them (echo suppression, I-10).
-    pub origin: ChangeOrigin,
-    /// The set of column names that actually changed in this write.
-    ///
-    /// - `None` (default): unknown — treat as "all columns potentially changed."
-    ///   Backends that do not read the pre-write row stamp `None`.
-    /// - `Some(set)`: exact set of columns whose stored value differed between
-    ///   the pre-write and post-write row. For inserts this is all columns in
-    ///   the stored row. For deletes this is always `None`.
-    ///
-    /// Mirrors the Swift `changedColumns: Set<String>?` field (CVK-WB4).
-    pub changed_columns: Option<std::collections::HashSet<String>>,
 }
 
 // MARK: - BlobEvent / BlobChange

@@ -665,7 +665,7 @@ dependencies = [
 [[package]]
 name = "intellectus-lib"
 version = "0.1.0"
-source = "git+https://github.com/codedaptive/moot-core?tag=v1.0.35#b53d8d5aea08fdc30ac14ca99f197472e70e71b6"
+source = "git+https://github.com/codedaptive/moot-core?tag=v1.0.36#9d48040e2b07558022006af3aeb56a11d7363b1c"
 
 [[package]]
 name = "itoa"
@@ -967,7 +967,6 @@ dependencies = [
  "aes-gcm",
  "chrono",
  "intellectus-lib",
- "libc",
  "native-tls",
  "postgres",
  "postgres-native-tls",
@@ -1386,7 +1385,7 @@ dependencies = [
 [[package]]
 name = "substrate-types"
 version = "1.0.0-skeleton"
-source = "git+https://github.com/codedaptive/moot-core?tag=v1.0.35#b53d8d5aea08fdc30ac14ca99f197472e70e71b6"
+source = "git+https://github.com/codedaptive/moot-core?tag=v1.0.36#9d48040e2b07558022006af3aeb56a11d7363b1c"
 
 [[package]]
 name = "subtle"

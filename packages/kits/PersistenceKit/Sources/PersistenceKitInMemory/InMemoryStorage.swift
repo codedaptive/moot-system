@@ -29,15 +29,6 @@ public final class InMemoryStorage: Storage, Sendable {
     public let auditLog: any AuditLog
     public let observer: any StorageObserver
 
-    /// Dataset store for user-defined tabular data (MX-TAB-1).
-    ///
-    /// Stored as a `let` — satisfies the `{ get throws }` protocol requirement
-    /// with a non-throwing stored property (valid in Swift: non-throwing is a
-    /// sub-type of throwing). Shares `stateActor` so dataset tables and row-
-    /// store tables live in the same in-memory state snapshot — rolling back a
-    /// transaction reverts both.
-    public let datasetStore: any DatasetStore
-
     let stateActor: InMemoryStateActor
     let observerRegistry: ObserverRegistry
 
@@ -62,9 +53,6 @@ public final class InMemoryStorage: Storage, Sendable {
         self.blobStore = InMemoryBlobStore(stateActor: actor)
         self.auditLog = InMemoryAuditLog(stateActor: actor)
         self.observer = InMemoryObserver(registry: registry)
-        // Dataset store — same stateActor, so dataset tables participate in
-        // transaction snapshots and rollbacks alongside row-store tables.
-        self.datasetStore = InMemoryDatasetStore(stateActor: actor)
     }
 
     public func open(schema: SchemaDeclaration) async throws {
@@ -314,11 +302,7 @@ actor InMemoryStateActor {
 
     // MARK: - Row operations (called by InMemoryRowStore)
 
-    func insertRow(
-        table: String,
-        values: [String: TypedValue],
-        origin: ChangeOrigin = .local
-    ) async throws -> RowHandle {
+    func insertRow(table: String, values: [String: TypedValue]) async throws -> RowHandle {
         guard var t = state.tables[table] else {
             throw StorageError.invalidQuery(detail: "insert: table \(table) not found")
         }
@@ -329,21 +313,11 @@ actor InMemoryStateActor {
         let stored = Self.materializeGenerated(t.declaration, values)
         t.rows[key] = stored
         state.tables[table] = t
-        // changedColumns for insert = all stored column names (every column in the
-        // row is "new"). Passed through to ConvergenceKit for precision LWW stamping.
-        await notify(TableChange(
-            table: table, event: .insert, rowKey: key, values: stored, origin: origin,
-            changedColumns: Set(stored.keys)
-        ))
+        await notify(TableChange(table: table, event: .insert, rowKey: key, values: stored))
         return RowHandle(table: table, key: key)
     }
 
-    func upsertRow(
-        table: String,
-        values: [String: TypedValue],
-        conflictColumns: [String],
-        origin: ChangeOrigin = .local
-    ) async throws -> RowHandle {
+    func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String]) async throws -> RowHandle {
         guard var t = state.tables[table] else {
             throw StorageError.invalidQuery(detail: "upsert: table \(table) not found")
         }
@@ -359,24 +333,14 @@ actor InMemoryStateActor {
             merged = Self.materializeGenerated(t.declaration, merged)
             t.rows[existingKey] = merged
             state.tables[table] = t
-            // changedColumns for upsert-as-update = columns whose value differs
-            // between the pre-upsert row and the merged result.
-            let changed = Set(merged.keys.filter { existingRow[$0] != merged[$0] })
-            await notify(TableChange(
-                table: table, event: .update, rowKey: existingKey, values: merged,
-                origin: origin, changedColumns: changed
-            ))
+            await notify(TableChange(table: table, event: .update, rowKey: existingKey, values: merged))
             return RowHandle(table: table, key: existingKey)
         }
         let key = resolveOrAllocateKey(table: t, values: values)
         let stored = Self.materializeGenerated(t.declaration, values)
         t.rows[key] = stored
         state.tables[table] = t
-        // changedColumns for upsert-as-insert = all stored column names (new row).
-        await notify(TableChange(
-            table: table, event: .insert, rowKey: key, values: stored, origin: origin,
-            changedColumns: Set(stored.keys)
-        ))
+        await notify(TableChange(table: table, event: .insert, rowKey: key, values: stored))
         return RowHandle(table: table, key: key)
     }
 
@@ -394,14 +358,7 @@ actor InMemoryStateActor {
             for (col, v) in values { merged[col] = v }
             merged = Self.materializeGenerated(t.declaration, merged)
             t.rows[k] = merged
-            // changedColumns for update = columns whose value differs between the
-            // pre-update row and the merged result. The pre-update `row` is
-            // available here before the merge, so no extra read is needed.
-            let changed = Set(merged.keys.filter { row[$0] != merged[$0] })
-            notifications.append(TableChange(
-                table: table, event: .update, rowKey: k, values: merged,
-                changedColumns: changed
-            ))
+            notifications.append(TableChange(table: table, event: .update, rowKey: k, values: merged))
             count += 1
         }
         state.tables[table] = t
@@ -409,11 +366,7 @@ actor InMemoryStateActor {
         return count
     }
 
-    func deleteRows(
-        table: String,
-        where predicate: StoragePredicate,
-        origin: ChangeOrigin = .local
-    ) async throws -> Int {
+    func deleteRows(table: String, where predicate: StoragePredicate) async throws -> Int {
         guard var t = state.tables[table] else {
             throw StorageError.invalidQuery(detail: "delete: table \(table) not found")
         }
@@ -424,12 +377,7 @@ actor InMemoryStateActor {
         var notifications: [TableChange] = []
         for (k, row) in t.rows where PredicateEvaluator.evaluate(predicate, against: row) {
             t.rows.removeValue(forKey: k)
-            // changedColumns for delete = nil. Column-level information is not
-            // meaningful on a tombstone; consumers use the rowKey only.
-            notifications.append(TableChange(
-                table: table, event: .delete, rowKey: k, values: row, origin: origin,
-                changedColumns: nil
-            ))
+            notifications.append(TableChange(table: table, event: .delete, rowKey: k, values: row))
             count += 1
         }
         state.tables[table] = t
@@ -495,28 +443,10 @@ actor InMemoryStateActor {
         return t.rows.count
     }
 
-    /// Resolve the internal `RowKey` for a row about to be written.
-    ///
-    /// Single-column PK only (composite/multi-column PKs fall through to the
-    /// random-mint default below — unchanged, out of gap-5's scope). For a
-    /// `.uuid`-typed PK, the value itself IS the key (unchanged fast path).
-    /// For a `.text`-typed PK, gap 5: derive the key DETERMINISTICALLY from
-    /// the PK's content via `RowKeyDerivation.deterministicRowKey(from:)`
-    /// instead of minting a fresh random `UUID()`. Before this fix, two
-    /// storage instances (e.g. two federation spokes) writing the same
-    /// logical row (same `.text` PK value) resolved two unrelated random
-    /// `RowKey`s, so ConvergenceKit's HLC-ordering gates — keyed by
-    /// `RowKey` — compared against mismatched side-table entries and
-    /// ordering silently degraded to pull-order instead of HLC-order. See
-    /// `RowKeyDerivation.swift` for the full rationale and the sibling
-    /// relationship to `Estate.deterministicUUID(from:)`.
     private func resolveOrAllocateKey(table: InMemoryTable, values: [String: TypedValue]) -> RowKey {
         if table.declaration.primaryKey.count == 1 {
             let pkName = table.declaration.primaryKey[0]
-            if let pkValue = values[pkName] {
-                if case .uuid(let u) = pkValue { return u }
-                if case .text(let s) = pkValue { return RowKeyDerivation.deterministicRowKey(from: s) }
-            }
+            if let pkValue = values[pkName], case .uuid(let u) = pkValue { return u }
         }
         return UUID()
     }
@@ -708,24 +638,5 @@ extension HLC {
         let l = UInt64(UInt32(bitPattern: logicalCount) & 0xFFF)
         let n = UInt64(UInt32(bitPattern: nodeID) & 0xF)
         return (p << 16) | (l << 4) | n
-    }
-}
-
-// MARK: - StorageMaintenance (shared-content 1.1 P5)
-
-extension InMemoryStorage: StorageMaintenance {
-    /// The in-memory backend has no page model and no on-disk footprint:
-    /// nothing is ever reclaimable.
-    public func estimatedReclaimableBytes() async throws -> Int64 { 0 }
-
-    /// Explicit no-op (per the StorageMaintenance backend table). The report
-    /// says `performed: false` so callers can distinguish "ran and freed
-    /// nothing" from "nothing to run".
-    public func performMaintenance(
-        progress: (@Sendable (StorageMaintenanceProgress) -> Void)?,
-        shouldCancel: (@Sendable () -> Bool)?
-    ) async throws -> StorageMaintenanceReport {
-        .noOp(backend: "inmemory",
-              note: "in-memory backend holds no pages; nothing to reclaim")
     }
 }
