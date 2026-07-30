@@ -592,9 +592,9 @@ dependencies = [
 
 [[package]]
 name = "hybrid-array"
-version = "0.4.13"
+version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "818356c5132c1fede50f837ca96afbe78ff42413047f4abb886217845e1b6c8c"
+checksum = "707114b52a152fa7bdb290cd7cd5912d9467273b6d74e21b8d81aca1f8533f6b"
 dependencies = [
  "typenum",
 ]
@@ -665,7 +665,7 @@ dependencies = [
 [[package]]
 name = "intellectus-lib"
 version = "0.1.0"
-source = "git+https://github.com/codedaptive/moot-core?tag=v1.0.36#9d48040e2b07558022006af3aeb56a11d7363b1c"
+source = "git+https://github.com/codedaptive/moot-core?tag=v1.0.37#3b06a0d544e01a0b07e259b6bc1b070f122bbe44"
 
 [[package]]
 name = "itoa"
@@ -1385,7 +1385,7 @@ dependencies = [
 [[package]]
 name = "substrate-types"
 version = "1.0.0-skeleton"
-source = "git+https://github.com/codedaptive/moot-core?tag=v1.0.36#9d48040e2b07558022006af3aeb56a11d7363b1c"
+source = "git+https://github.com/codedaptive/moot-core?tag=v1.0.37#3b06a0d544e01a0b07e259b6bc1b070f122bbe44"
 
 [[package]]
 name = "subtle"

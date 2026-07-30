@@ -2,7 +2,7 @@
 # Publish Report
 
 Venue: `moot-system`
-Source commit: `2c30254551f920bc319855c3278a87a88af97fc4`
+Source commit: `1ea9e910eb626806f4452aef03d063c04b60c82a`
 
 ## Loaded Packages
 
@@ -33,7 +33,7 @@ Removed internal/process comment lines:
 - `packages/kits/ConvergenceKit/Tests/ConvergenceKitFederationTests/FederationPairingTests.swift`: 1 line(s)
 - `packages/kits/ConvergenceKit/Tests/ConvergenceKitNoneTests/NoSyncEngineTests.swift`: 1 line(s)
 - `packages/kits/ConvergenceKit/Tests/ConvergenceKitTests/ConvergenceKitCoreTypeTests.swift`: 1 line(s)
-- `packages/kits/ConvergenceKit/rust/src/federation.rs`: 5 line(s)
+- `packages/kits/ConvergenceKit/rust/src/federation.rs`: 4 line(s)
 - `packages/kits/ConvergenceKit/rust/src/record.rs`: 1 line(s)
 - `packages/kits/ConvergenceKit/rust/tests/federation_tests.rs`: 1 line(s)
 - `packages/kits/ConvergenceKit/rust/tests/wire_format_tests.rs`: 1 line(s)

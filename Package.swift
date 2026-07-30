@@ -24,7 +24,7 @@ let package = Package(
         .library(name: "ObserverSink", targets: ["ObserverSink"])
     ],
     dependencies: [
-        .package(url: "https://github.com/codedaptive/moot-core.git", exact: "1.0.36"),
+        .package(url: "https://github.com/codedaptive/moot-core.git", exact: "1.0.37"),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.21.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.25.0")
